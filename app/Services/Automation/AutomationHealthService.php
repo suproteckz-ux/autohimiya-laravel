@@ -50,7 +50,15 @@ class AutomationHealthService
     public function schedulerRegistered(): bool
     {
         $commands = file_get_contents(base_path('routes/console.php')) ?: '';
-        return str_contains($commands, 'automation:run-pending') && str_contains($commands, 'automation:queue') && str_contains($commands, 'paloma_sync_remains') && str_contains($commands, 'kaspi_resolve_widget_urls') && str_contains($commands, 'kaspi_import_content');
+
+        $hasRequiredScheduleDefinitions = str_contains($commands, 'automation:scheduler-heartbeat')
+            && str_contains($commands, 'automation:run-pending --limit=1')
+            && str_contains($commands, 'automation:queue')
+            && str_contains($commands, 'AutomationType::PalomaSyncRemains')
+            && str_contains($commands, 'AutomationType::KaspiResolveWidgetUrls')
+            && str_contains($commands, 'AutomationType::KaspiImportContent');
+
+        return $hasRequiredScheduleDefinitions || filled(Cache::get('automation.scheduler_heartbeat_at'));
     }
 
     private function dbOk(): bool { try { DB::select('select 1'); return true; } catch (\Throwable) { return false; } }
