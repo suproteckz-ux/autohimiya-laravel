@@ -4522,10 +4522,14 @@ a.category-wall-toggle,
 
 .product-image {
     flex: 0 0 188px;
+    width: 188px;
+    max-width: 100%;
     height: 188px;
     min-height: 188px;
+    aspect-ratio: 1 / 1;
     display: grid;
     place-items: center;
+    align-self: center;
     padding: 12px;
     overflow: hidden;
     border-radius: 14px;
@@ -4535,6 +4539,8 @@ a.category-wall-toggle,
 .image-fit-product {
     width: 100%;
     height: 100%;
+    max-width: 100%;
+    max-height: 100%;
     object-fit: contain;
     object-position: center;
 }
@@ -4753,6 +4759,7 @@ a.category-wall-toggle,
 
     .product-image {
         flex-basis: 168px;
+        width: 168px;
         height: 168px;
         min-height: 168px;
     }
@@ -4784,30 +4791,7 @@ a.category-wall-toggle,
 }
 
 
-/* Final storefront polish: shared product image rendering + aligned left category tree. */
-:root {
-    --product-card-image-area: 188px;
-}
-
-.product-grid .product-card .product-image,
-.home-products .product-card .product-image {
-    flex: 0 0 var(--product-card-image-area);
-    height: var(--product-card-image-area);
-    min-height: var(--product-card-image-area);
-    display: grid;
-    place-items: center;
-}
-
-.product-grid .product-card .product-image img,
-.home-products .product-card .product-image img,
-.product-grid .product-card .image-fit-product,
-.home-products .product-card .image-fit-product {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    object-position: center;
-}
-
+/* Final storefront polish: aligned left category tree. */
 .category-tree .nav-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 30px;
@@ -4837,10 +4821,4 @@ a.category-wall-toggle,
 .category-tree .nav-chevron--placeholder {
     visibility: hidden;
     pointer-events: none;
-}
-
-@media (max-width: 640px) {
-    :root {
-        --product-card-image-area: 168px;
-    }
 }
