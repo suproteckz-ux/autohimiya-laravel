@@ -6,6 +6,7 @@ use App\Filament\Resources\ProductResource\Pages;
 use App\Models\CatalogEnrichmentTask;
 use App\Models\Product;
 use App\Services\Catalog\ProductThumbnailGenerator;
+use App\Services\Catalog\ProductBulkCategoryAssigner;
 use App\Support\AdminBrandOptions;
 use App\Support\AdminCategoryOptions;
 use App\Support\ProductStatus;
@@ -96,7 +97,7 @@ class ProductResource extends Resource
                                         ->image()
                                         ->acceptedFileTypes(['image/jpeg', 'image/png', 'image/webp'])
                                         ->maxSize(5120)
-                                        ->imagePreviewHeight('180')
+                                        ->imagePreviewHeight('120')
                                         ->panelAspectRatio('1:1')
                                         ->panelLayout('integrated')
                                         ->downloadable()
@@ -104,16 +105,17 @@ class ProductResource extends Resource
                                         ->required(),
                                     TextInput::make('alt')->label('Alt text')->maxLength(255),
                                     TextInput::make('title')->label('Title')->maxLength(255),
-                                    Toggle::make('is_primary')->label('Главное фото'),
+                                    Toggle::make('is_primary')->label('Primary photo')->helperText('Only one image remains primary after save.'),
                                     Hidden::make('source')->default('manual'),
                                     Hidden::make('role')->default('gallery'),
-                                    Hidden::make('sort_order')->default(0),
+                                    TextInput::make('sort_order')->label('Sort order')->numeric()->default(0)->minValue(0),
                                     Hidden::make('card_thumb_path'),
                                     Hidden::make('opencart_image_id'),
                                     Hidden::make('original_path'),
                                     Hidden::make('original_name'),
                                 ])
-                                ->columns(2)
+                                ->columns(3)
+                                ->grid(['md' => 2, 'xl' => 3])
                                 ->itemLabel(fn (array $state): ?string => ($state['is_primary'] ?? false) ? 'Главное фото' : ($state['title'] ?? $state['alt'] ?? 'Фото'))
                                 ->orderColumn('sort_order')
                                 ->reorderable()
@@ -361,15 +363,9 @@ class ProductResource extends Resource
                         Select::make('category_id')->label('Категория')->options(fn (): array => AdminCategoryOptions::active())->searchable()->required(),
                     ])
                     ->action(function (Collection $records, array $data): void {
-                        $newCategoryId = (int) $data['category_id'];
-                        $defaultCategoryId = \App\Services\Catalog\DefaultCategoryResolver::getOrCreateNewProductsCategoryId();
-                        foreach ($records as $record) {
-                            $record->update(['category_id' => $newCategoryId]);
-                            if ($newCategoryId !== $defaultCategoryId) {
-                                $record->categories()->detach($defaultCategoryId);
-                            }
-                        }
-                    }),
+                        app(ProductBulkCategoryAssigner::class)->assign($records, (int) $data['category_id']);
+                    })
+                    ->deselectRecordsAfterCompletion(),
                 BulkAction::make('assign_brand')
                     ->label('Назначить бренд')
                     ->icon('heroicon-o-building-storefront')

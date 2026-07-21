@@ -4,6 +4,7 @@ namespace App\Filament\Resources\ProductResource\Pages;
 
 use App\Filament\Resources\ProductResource;
 use App\Models\KaspiEnrichmentTask;
+use App\Models\ProductImage;
 use App\Services\Catalog\ProductThumbnailGenerator;
 use App\Services\Kaspi\KaspiProductDiscoveryService;
 use App\Support\ContentScore;
@@ -48,6 +49,8 @@ class EditProduct extends EditRecord
         $flags = [];
 
         if (array_key_exists('images', $data)) {
+            ProductImage::syncProductPrimaryImage((int) $this->record->id);
+            $this->record->refresh();
             $flags['photos_are_manual'] = true;
         }
 

@@ -27,6 +27,8 @@
                     <path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
             </button>
+        @else
+            <span class="nav-chevron nav-chevron--placeholder" aria-hidden="true"></span>
         @endif
     </div>
     @if($hasChildren)
