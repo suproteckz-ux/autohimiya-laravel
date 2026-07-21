@@ -1,4 +1,4 @@
-﻿.env
+.env
 .env.*
 !.env.example
 /vendor/
@@ -37,3 +37,4 @@ serve-*.pid
 Thumbs.db
 Desktop.ini
 .claude/
+.phpunit.result.cache

@@ -62,7 +62,11 @@ return new class extends Migration
 
     private function indexExists(string $table, string $name): bool
     {
-        $database = DB::getDatabaseName();
+                if (DB::connection()->getDriverName() !== 'mysql') {
+            return false;
+        }
+
+$database = DB::getDatabaseName();
 
         return DB::table('information_schema.statistics')
             ->where('table_schema', $database)
@@ -76,7 +80,11 @@ return new class extends Migration
      */
     private function indexForColumnsExists(string $table, array $columns): bool
     {
-        $database = DB::getDatabaseName();
+                if (DB::connection()->getDriverName() !== 'mysql') {
+            return false;
+        }
+
+$database = DB::getDatabaseName();
         $indexes = DB::table('information_schema.statistics')
             ->select(['index_name', 'column_name', 'seq_in_index'])
             ->where('table_schema', $database)

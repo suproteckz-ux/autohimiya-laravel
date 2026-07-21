@@ -5,7 +5,9 @@ namespace App\Filament\Pages;
 use App\Filament\Widgets\KaspiContentStatsOverview;
 use App\Models\KaspiEnrichmentTask;
 use App\Models\Product;
-use App\Services\Automation\ArtisanProcessRunner;
+use App\Enums\AutomationRunSource;
+use App\Enums\AutomationType;
+use App\Services\Automation\AutomationRunService;
 use App\Services\Kaspi\KaspiDraftPublisher;
 use App\Services\Kaspi\KaspiEnrichmentParser;
 use App\Services\Kaspi\KaspiProductDiscoveryService;
@@ -28,8 +30,7 @@ use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
-use Illuminate\Support\Facades\Http;
-use Throwable;
+use Illuminate\Support\Facades\Auth;
 use UnitEnum;
 
 class KaspiSyncCenter extends Page implements HasTable
@@ -256,20 +257,20 @@ class KaspiSyncCenter extends Page implements HasTable
             ])
             ->headerActions([
                 Action::make('resolve_missing_urls')
-                    ->label('CLI: Resolve missing URLs')
+                    ->label('Поставить поиск URL Kaspi')
                     ->icon('heroicon-o-command-line')
                     ->color('warning')
-                    ->action(fn (): bool => $this->showResolverCliCommands()),
+                    ->action(fn (): bool => $this->requestAutomationRun(AutomationType::KaspiResolveWidgetUrls, ['limit' => 50, 'headless' => true, 'delay_ms' => 5000, 'only_missing_url' => true])),
                 Action::make('resolve_missing_urls_fetch')
-                    ->label('CLI: Resolve + Import')
+                    ->label('Поставить поиск URL + импорт')
                     ->icon('heroicon-o-command-line')
                     ->color('warning')
-                    ->action(fn (): bool => $this->showResolverCliCommands(true)),
+                    ->action(fn (): bool => $this->requestAutomationRun(AutomationType::KaspiResolveWidgetUrls, ['limit' => 50, 'headless' => true, 'delay_ms' => 5000, 'only_missing_url' => true, 'fetch_content' => true])),
                 Action::make('mass_import_cli')
-                    ->label('Import all Kaspi content (CLI)')
+                    ->label('Поставить импорт Kaspi')
                     ->icon('heroicon-o-arrow-down-on-square-stack')
                     ->color('success')
-                    ->action(fn (): bool => $this->showMassImportCliCommand()),
+                    ->action(fn (): bool => $this->requestAutomationRun(AutomationType::KaspiImportContent, ['limit' => 0, 'only_missing' => true, 'force' => false, 'delay_ms' => 3000])),
             ])
             ->actions([
                 Action::make('check_kaspi')
@@ -311,7 +312,7 @@ class KaspiSyncCenter extends Page implements HasTable
                     ->icon('heroicon-o-cloud-arrow-down')
                     ->iconButton()
                     ->visible(fn (Product $record): bool => $this->hasKaspiUrl($record))
-                    ->action(fn (Product $record): bool => $this->fetchEnrichment($record)),
+                    ->action(fn (Product $record): bool => $this->requestAutomationRun(AutomationType::KaspiImportContent, ['product_id' => $record->id, 'limit' => 1, 'force' => false, 'delay_ms' => 3000])),
                 Action::make('import_kaspi_content')
                     ->label('CLI import command')
                     ->tooltip('Показать CLI-команду импорта. Admin не применяет force-import из web-процесса.')
@@ -319,7 +320,7 @@ class KaspiSyncCenter extends Page implements HasTable
                     ->iconButton()
                     ->color('success')
                     ->visible(fn (Product $record): bool => $this->hasKaspiUrl($record))
-                    ->action(fn (Product $record): bool => $this->showSingleImportCliCommand($record)),
+                    ->action(fn (Product $record): bool => $this->requestAutomationRun(AutomationType::KaspiImportContent, ['product_id' => $record->id, 'limit' => 1, 'force' => true, 'delay_ms' => 3000])),
                 Action::make('view_draft')
                     ->label('Открыть Draft')
                     ->tooltip('Сравнить текущий контент сайта и найденный контент Kaspi')
@@ -396,17 +397,17 @@ class KaspiSyncCenter extends Page implements HasTable
                     ->label('Resolve selected widget URLs')
                     ->icon('heroicon-o-bolt')
                     ->requiresConfirmation()
-                    ->action(fn (Collection $records): bool => $this->resolveWidgetUrls($records, false)),
+                    ->action(fn (Collection $records): bool => $this->requestAutomationRun(AutomationType::KaspiResolveWidgetUrls, ['ids' => $records->pluck('id')->implode(','), 'limit' => $records->count(), 'headless' => true, 'delay_ms' => 5000, 'only_missing_url' => false])),
                 BulkAction::make('check_selected_fetch')
                     ->label('Resolve selected widget URLs + Fetch')
                     ->icon('heroicon-o-cloud-arrow-down')
                     ->requiresConfirmation()
-                    ->action(fn (Collection $records): bool => $this->resolveWidgetUrls($records, true)),
+                    ->action(fn (Collection $records): bool => $this->requestAutomationRun(AutomationType::KaspiResolveWidgetUrls, ['ids' => $records->pluck('id')->implode(','), 'limit' => $records->count(), 'headless' => true, 'delay_ms' => 5000, 'only_missing_url' => false, 'fetch_content' => true])),
                 BulkAction::make('import_selected_kaspi_cli')
                     ->label('Import Kaspi content (CLI command)')
                     ->icon('heroicon-o-arrow-down-on-square')
                     ->color('success')
-                    ->action(fn (Collection $records): bool => $this->showImportCliCommand($records)),
+                    ->action(fn (Collection $records): bool => $this->requestAutomationRun(AutomationType::KaspiImportContent, ['ids' => $records->pluck('id')->implode(','), 'limit' => $records->count(), 'force' => true, 'delay_ms' => 3000])),
                 BulkAction::make('create_tasks')
                     ->label('Создать задачи')
                     ->icon('heroicon-o-clipboard-document-check')
@@ -469,6 +470,20 @@ class KaspiSyncCenter extends Page implements HasTable
         };
     }
 
+    private function requestAutomationRun(AutomationType $type, array $context = []): bool
+    {
+        $result = app(AutomationRunService::class)->request($type, AutomationRunSource::Admin, Auth::user(), $context);
+
+        Notification::make()
+            ->title($result['created'] ? 'Задача поставлена в очередь выполнения' : 'Такая задача уже ожидает выполнения или выполняется')
+            ->body($type->russianLabel().' #'.$result['run']->id)
+            ->status($result['created'] ? 'success' : 'warning')
+            ->send();
+
+        $this->resetTable();
+
+        return true;
+    }
     public function showResolverCliCommands(bool $includeImport = false): bool
     {
         $commands = [
@@ -518,201 +533,38 @@ class KaspiSyncCenter extends Page implements HasTable
 
     public function resolveWidgetUrl(Product $product, bool $fetchContent = false): bool
     {
-        try {
-            $result = $this->runResolveWidgetArtisan($product, $fetchContent);
-        } catch (Throwable $exception) {
-            $result = [
-                'status' => 'error',
-                'error' => $this->friendlyResolverError($exception->getMessage()),
-                'resolved_kaspi_url' => null,
-            ];
-        }
-
-        $this->resetTable();
-
-        // Subprocess could not connect to MySQL from web context — show the CLI command instead.
-        if (($result['status'] ?? null) === 'process_failed') {
-            Notification::make()
-                ->title('Resolver process failed — use CLI')
-                ->body(
-                    'php artisan kaspi:resolve-widget-urls'
-                    .' --product-id='.$product->id
-                    .' --delay-ms=3000'
-                    .' --only-missing-url=false'
-                )
-                ->warning()
-                ->persistent()
-                ->send();
-
-            return true;
-        }
-
-        $ok = ($result['status'] ?? null) === 'resolved_from_widget' && filled($result['resolved_kaspi_url'] ?? null);
-
-        Notification::make()
-            ->title($ok ? 'Kaspi URL saved' : $this->resolverStatusLabel((string) ($result['status'] ?? 'error')))
-            ->body($ok ? (string) $result['resolved_kaspi_url'] : $this->friendlyResolverError((string) ($result['error'] ?? $result['status'] ?? '')))
-            ->status($ok ? 'success' : 'warning')
-            ->send();
-
-        return true;
+        return $this->requestAutomationRun(AutomationType::KaspiResolveWidgetUrls, [
+            'product_id' => $product->id,
+            'limit' => 1,
+            'headless' => true,
+            'delay_ms' => 5000,
+            'only_missing_url' => false,
+            'retry_not_found' => true,
+            'fetch_content' => $fetchContent,
+        ]);
     }
-
     public function resolveWidgetUrls(Collection $products, bool $fetchContent = false): bool
     {
-        $processed = 0;
-        $resolved = 0;
-        $failed = 0;
-        $firstErrors = [];
-
-        foreach ($products->filter(fn (Product $product): bool => $product->canShowKaspiCreditButton()) as $product) {
-            try {
-                $result = $this->runResolveWidgetArtisan($product, $fetchContent);
-                $processed++;
-
-                if (($result['status'] ?? null) === 'resolved_from_widget' && filled($result['resolved_kaspi_url'] ?? null)) {
-                    $resolved++;
-                } else {
-                    $failed++;
-                    if (count($firstErrors) < 5) {
-                        $firstErrors[] = $product->sku.': '.$this->resolverStatusLabel((string) ($result['status'] ?? 'error'));
-                    }
-                }
-            } catch (Throwable $exception) {
-                $processed++;
-                $failed++;
-                if (count($firstErrors) < 5) {
-                    $firstErrors[] = $product->sku.': '.$this->friendlyResolverError($exception->getMessage());
-                }
-            }
-        }
-
-        $this->resetTable();
-
-        Notification::make()
-            ->title('Widget resolver finished')
-            ->body(collect([
-                'Processed: '.$processed,
-                'URL saved: '.$resolved,
-                'Needs attention: '.$failed,
-                $firstErrors === [] ? null : 'First issues: '.implode('; ', $firstErrors),
-            ])->filter()->implode("\n"))
-            ->status($failed > 0 ? 'warning' : 'success')
-            ->send();
-
-        return true;
+        return $this->requestAutomationRun(AutomationType::KaspiResolveWidgetUrls, [
+            'ids' => $products->pluck('id')->implode(','),
+            'limit' => $products->count(),
+            'headless' => true,
+            'delay_ms' => 5000,
+            'only_missing_url' => false,
+            'fetch_content' => $fetchContent,
+        ]);
     }
 
     public function resolveMissingWidgetUrls(bool $fetchContent = false): bool
     {
-        $products = Product::query()
-            ->with(['kaspiEnrichmentTasks' => fn ($query) => $query->latest('updated_at')])
-            ->whereNotNull('sku')
-            ->where('sku', '<>', '')
-            ->where(fn (Builder $query) => $query->whereNull('kaspi_product_url')->orWhere('kaspi_product_url', ''))
-            ->limit(25)
-            ->get()
-            ->filter(fn (Product $product): bool => $product->canShowKaspiCreditButton());
-
-        return $this->resolveWidgetUrls($products, $fetchContent);
+        return $this->requestAutomationRun(AutomationType::KaspiResolveWidgetUrls, [
+            'limit' => 25,
+            'headless' => true,
+            'delay_ms' => 5000,
+            'only_missing_url' => true,
+            'fetch_content' => $fetchContent,
+        ]);
     }
-
-    private function runResolveWidgetArtisan(Product $product, bool $fetchContent): array
-    {
-        $arguments = [
-            'kaspi:resolve-widget-urls',
-            '--product-id='.$product->id,
-            '--limit=1',
-            '--headless',
-            '--delay-ms=3000',
-            '--only-missing-url=false',
-            '--retry-not-found',
-            '--fetch-content='.($fetchContent ? 'true' : 'false'),
-        ];
-
-        $result = app(ArtisanProcessRunner::class)->run($arguments, ['APP_URL' => config('app.url')], 180);
-        $stdout = (string) ($result['stdout'] ?? '');
-        $stderr = (string) ($result['stderr'] ?? '');
-        $exitCode = $result['exit_code'] ?? null;
-        $durationMs = (int) ($result['duration_ms'] ?? 0);
-
-        // Unset relation before refresh so latestTask() re-queries with latest('updated_at'),
-        // bypassing any relation cache that was populated before the subprocess ran.
-        $product->unsetRelation('kaspiEnrichmentTasks');
-        $product->refresh();
-
-        $task = $this->latestTask($product);
-
-        // Save diagnostics to existing task only — don't create a phantom record on process failure
-        if ($task) {
-            $diagnostics = [
-                'source'      => 'filament_artisan_action',
-                'cwd'         => $result['cwd'] ?? base_path(),
-                'app_url'     => 'http://127.0.0.1:8000',
-                'php_binary'  => $result['php_binary'] ?? PHP_BINARY,
-                'command'     => $result['command'] ?? implode(' ', $arguments),
-                'exit_code'   => $exitCode,
-                'successful'  => (bool) ($result['successful'] ?? false),
-                'stdout'      => $stdout,
-                'stderr'      => $stderr,
-                'duration_ms' => $durationMs,
-                'env_keys'    => $result['env_keys'] ?? [],
-                'db_connection' => $result['db_connection'] ?? null,
-                'db_host' => $result['db_host'] ?? null,
-                'db_port' => $result['db_port'] ?? null,
-                'db_database' => $result['db_database'] ?? null,
-                'cache_store' => $result['cache_store'] ?? null,
-            ];
-            $rawPayload = (array) ($task->raw_payload ?: []);
-            data_set($rawPayload, 'diagnostics.filament_artisan_resolver', $diagnostics);
-            $task->forceFill(['raw_payload' => $rawPayload])->save();
-        }
-
-        // If the subprocess itself failed, report that clearly — never surface a stale task status
-        if (! (bool) ($result['successful'] ?? false)) {
-            $detail = mb_substr(strip_tags($stderr ?: $stdout ?: 'no output'), 0, 200);
-
-            return [
-                'product_id'         => $product->id,
-                'sku'                => $product->sku,
-                'product_url'        => route('products.show', $product->slug),
-                'widget_found'       => null,
-                'button_found'       => null,
-                'resolved_kaspi_url' => null,
-                'status'             => 'process_failed',
-                'error'              => "exit {$exitCode} · {$detail}",
-                'duration_ms'        => $durationMs,
-            ];
-        }
-
-        // Subprocess succeeded: product.kaspi_product_url is the source of truth
-        $resolvedUrl = $product->kaspi_product_url;
-
-        if (! filled($resolvedUrl)) {
-            // URL not yet in product — check task for actual resolver status
-            $task ??= $this->createTaskRecord($product);
-            $task->refresh();
-            $resolvedUrl = $task->kaspi_product_url;
-        }
-
-        $status = filled($resolvedUrl) ? 'resolved_from_widget' : ($task?->status ?: 'needs_manual_url');
-        $error = filled($resolvedUrl)
-            ? null
-            : $this->friendlyResolverError($task?->error ?: $stderr ?: $stdout ?: 'URL not received.');
-
-        return [
-            'product_id'         => $product->id,
-            'sku'                => $product->sku,
-            'product_url'        => route('products.show', $product->slug),
-            'widget_found'       => ($task?->status === 'widget_not_found') ? 'no' : null,
-            'button_found'       => ($task?->status === 'kaspi_button_not_found') ? 'no' : null,
-            'resolved_kaspi_url' => $resolvedUrl,
-            'status'             => $status,
-            'error'              => $error,
-            'duration_ms'        => $durationMs,
-        ];
-    }
-
     public function tryPublicSearch(Product $product): bool
     {
         $result = app(KaspiProductDiscoveryService::class)->searchPublic($product, (bool) config('services.kaspi.dry_run', true));
@@ -736,66 +588,13 @@ class KaspiSyncCenter extends Page implements HasTable
 
     public function fetchEnrichment(Product $product): bool
     {
-        $task = $this->latestTask($product) ?: $this->createTaskRecord($product);
-        $url = $this->kaspiUrl($product);
-
-        if ((bool) config('services.kaspi.dry_run', true) || ! config('services.kaspi.enrichment_enabled')) {
-            Notification::make()
-                ->title('Dry-run')
-                ->body('Kaspi page was not requested. Disable KASPI_DRY_RUN and enable KASPI_ENRICHMENT_ENABLED for real parsing.')
-                ->warning()
-                ->send();
-
-            return true;
-        }
-
-        if (blank($url)) {
-            $task->update(['status' => 'needs_manual_url', 'error' => 'Kaspi URL is required before content fetch.']);
-            Notification::make()
-                ->title('Kaspi URL нужен вручную')
-                ->body('Товар привязан к Kaspi-кнопке, но URL карточки нужно подтвердить или вставить вручную.')
-                ->warning()
-                ->send();
-
-            return true;
-        }
-
-        try {
-            $task->update([
-                'kaspi_product_url' => $url,
-                'status' => 'running',
-                'started_at' => now(),
-                'error' => null,
-            ]);
-            sleep(max(1, (int) config('services.kaspi.rate_limit_seconds', 10)));
-            $response = Http::timeout(20)
-                ->withHeaders(['User-Agent' => 'AutohimiyaKzBot/1.0 (+https://autohimiki.kz)'])
-                ->get($url);
-            $payload = app(KaspiEnrichmentParser::class)->parse($response->body(), $url);
-
-            $task->update([
-                'status' => 'draft',
-                'parsed_title' => ['value' => $payload['name'] ?? null],
-                'parsed_images' => $payload['images'] ?? [],
-                'parsed_description' => $payload['description'] ?? null,
-                'parsed_attributes' => $payload['attributes'] ?? [],
-                'parsed_brand' => $payload['brand'] ?? null,
-                'parsed_category' => $payload['category'] ?? null,
-                'raw_payload' => $payload,
-                'finished_at' => now(),
-                'error' => null,
-            ]);
-
-            $this->resetTable();
-            Notification::make()->title('Kaspi draft created')->success()->send();
-        } catch (Throwable $exception) {
-            $task->update(['status' => 'failed', 'finished_at' => now(), 'error' => $exception->getMessage()]);
-            Notification::make()->title('Kaspi fetch failed')->body($exception->getMessage())->danger()->send();
-        }
-
-        return true;
+        return $this->requestAutomationRun(AutomationType::KaspiImportContent, [
+            'product_id' => $product->id,
+            'limit' => 1,
+            'force' => false,
+            'delay_ms' => 3000,
+        ]);
     }
-
     public function setLatestTaskStatus(Product $product, string $status): bool
     {
         $task = $this->latestTask($product);
@@ -981,128 +780,13 @@ class KaspiSyncCenter extends Page implements HasTable
 
     public function importKaspiContent(Product $product): bool
     {
-        $url = $this->kaspiUrl($product);
-
-        if (blank($url)) {
-            Notification::make()->title('Kaspi URL не найден')->warning()->send();
-
-            return true;
-        }
-
-        if (! config('services.kaspi.enrichment_enabled')) {
-            Notification::make()
-                ->title('KASPI_ENRICHMENT_ENABLED не включён')
-                ->body('Установите KASPI_ENRICHMENT_ENABLED=true в .env и выполните php artisan optimize:clear.')
-                ->warning()
-                ->persistent()
-                ->send();
-
-            return true;
-        }
-
-        try {
-            $response = Http::timeout(30)
-                ->withHeaders(['User-Agent' => 'AutohimiyaKzBot/1.0 (+https://autohimiki.kz)'])
-                ->get($url);
-
-            if (! $response->successful()) {
-                Notification::make()
-                    ->title('Kaspi заблокировал запро��')
-                    ->body('HTTP '.$response->status().' — попробуйте позже.')
-                    ->warning()
-                    ->send();
-
-                $task = $this->latestTask($product) ?: $this->createTaskRecord($product);
-                $task->update(['status' => 'kaspi_blocked', 'error' => 'HTTP '.$response->status(), 'finished_at' => now()]);
-                $this->resetTable();
-
-                return true;
-            }
-
-            $payload = app(KaspiEnrichmentParser::class)->parse($response->body(), $url);
-
-            $task = $this->latestTask($product);
-            $taskFill = [
-                'kaspi_product_url' => $url,
-                'status' => 'running',
-                'started_at' => now(),
-                'parsed_title' => ['value' => $payload['name'] ?? null],
-                'parsed_images' => $payload['images'] ?? [],
-                'parsed_description' => $payload['description'] ?? null,
-                'parsed_attributes' => $payload['attributes'] ?? [],
-                'parsed_brand' => $payload['brand'] ?? null,
-                'parsed_category' => $payload['category'] ?? null,
-                'raw_payload' => $payload,
-                'finished_at' => now(),
-                'error' => null,
-            ];
-
-            if ($task) {
-                $task->update($taskFill);
-                $task->refresh();
-            } else {
-                $task = KaspiEnrichmentTask::query()->create(array_merge($taskFill, [
-                    'product_id' => $product->id,
-                    'kaspi_merchant_sku' => $product->sku,
-                    'source' => 'filament_import',
-                ]));
-            }
-
-            $result = app(KaspiDraftPublisher::class)->publish($task, [
-                'dry_run' => false,
-                'apply_photo' => true,
-                'apply_description' => true,
-                'apply_attributes' => true,
-                'force_photo' => true,
-                'force_description' => true,
-                'force_attributes' => true,
-                'replace_kaspi_attributes' => true,
-            ]);
-
-            $photosAdded = (int) ($result['photo']['added'] ?? 0);
-            $descAdded = (int) ($result['description']['added'] ?? 0);
-            $attrsAdded = (int) ($result['attributes']['added'] ?? 0);
-
-            $images = (array) data_get($payload, 'cleaned.images', []);
-            $description = data_get($payload, 'cleaned.description');
-            $attributes = (array) data_get($payload, 'cleaned.attributes', []);
-
-            $available = (int) (count($images) > 0) + (int) filled($description) + (int) (count($attributes) > 0);
-            $applied = (int) ($photosAdded > 0) + (int) ($descAdded > 0) + (int) ($attrsAdded > 0);
-
-            $importStatus = match (true) {
-                $available === 0 => 'kaspi_no_data',
-                $applied === $available => 'kaspi_imported',
-                $applied > 0 => 'kaspi_partial',
-                default => 'kaspi_no_data',
-            };
-
-            $task->update(['status' => $importStatus, 'finished_at' => now()]);
-
-            $product->unsetRelation('kaspiEnrichmentTasks');
-            $this->resetTable();
-
-            Notification::make()
-                ->title($importStatus === 'kaspi_imported' ? 'Kaspi контент импортирован' : 'Kaspi контент частично импортирован')
-                ->body(implode("\n", array_filter([
-                    'Фото: '.($photosAdded > 0 ? "добавлено {$photosAdded}" : $result['photo']['reason']),
-                    'Описание: '.($descAdded > 0 ? 'добавлено' : $result['description']['reason']),
-                    'Характеристики: добавлено '.$attrsAdded,
-                    'Цена, остаток и SKU не изменялись.',
-                ])))
-                ->status($importStatus === 'kaspi_imported' ? 'success' : 'warning')
-                ->send();
-        } catch (Throwable $exception) {
-            Notification::make()
-                ->title('Ошибка импорта Kaspi контента')
-                ->body(mb_substr($exception->getMessage(), 0, 200))
-                ->danger()
-                ->send();
-        }
-
-        return true;
+        return $this->requestAutomationRun(AutomationType::KaspiImportContent, [
+            'product_id' => $product->id,
+            'limit' => 1,
+            'force' => true,
+            'delay_ms' => 3000,
+        ]);
     }
-
     public function showImportCliCommand(Collection $products): bool
     {
         $ids = $products->pluck('id')->implode(',');

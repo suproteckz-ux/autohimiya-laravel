@@ -98,3 +98,51 @@ Preferred rollback is release-based:
 3. Restore database backup only if migrations changed schema and forward-fix is not possible.
 
 For direct root deployment, rollback requires restoring the full file backup and database backup if schema changed.
+
+## Shared Hosting Automation Update
+
+Use the PHP 8.3 binary for every production Artisan command:
+
+```bash
+/opt/alt/php83/usr/bin/php
+```
+
+Do not use `/usr/bin/php` for this application.
+
+Primary Plesk Scheduled Task:
+
+```bash
+cd www/xn--80aesatk1az7g.kz && /opt/alt/php83/usr/bin/php artisan schedule:run
+```
+
+Frequency: every minute, or the nearest supported interval if every minute is unavailable.
+
+Optional short-lived queue worker:
+
+```bash
+cd www/xn--80aesatk1az7g.kz && /opt/alt/php83/usr/bin/php artisan queue:work --stop-when-empty --tries=3 --timeout=120
+```
+
+Safe post-deploy sequence:
+
+```bash
+cd www/xn--80aesatk1az7g.kz
+/opt/alt/php83/usr/bin/php artisan optimize:clear
+composer install --no-dev --prefer-dist --optimize-autoloader
+```
+
+Run migrations only after explicit owner approval and a database backup:
+
+```bash
+/opt/alt/php83/usr/bin/php artisan migrate --force
+```
+
+Then rebuild caches:
+
+```bash
+/opt/alt/php83/usr/bin/php artisan config:cache
+/opt/alt/php83/usr/bin/php artisan route:cache
+/opt/alt/php83/usr/bin/php artisan view:cache
+```
+
+Do not run `storage:link` automatically. Verify the existing `public/storage -> storage/app/public` symlink before changing it.
