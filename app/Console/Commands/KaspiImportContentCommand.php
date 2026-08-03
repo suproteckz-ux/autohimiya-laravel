@@ -53,6 +53,21 @@ class KaspiImportContentCommand extends Command
         }
 
         $this->table(['Metric', 'Count'], collect($result['metrics'] ?? [])->map(fn (int $count, string $metric): array => [$metric, $count])->values()->all());
+        if (($result['blocked_diagnostics'] ?? []) !== []) {
+            $this->table(
+                ['SKU', 'HTTP', 'Effective URL', 'Content-Type', 'Bytes', 'Retry-After', 'Location', 'Classification'],
+                collect($result['blocked_diagnostics'])->map(fn (array $row): array => [
+                    $row['sku'] ?? '',
+                    $row['http_status'] ?? '',
+                    $row['effective_url'] ?? '',
+                    $row['content_type'] ?? '',
+                    $row['response_size'] ?? 0,
+                    $row['retry_after'] ?? '',
+                    $row['location'] ?? '',
+                    $row['classification'] ?? 'other',
+                ])->values()->all()
+            );
+        }
         $this->info((string) ($result['message'] ?? 'Import complete.'));
 
         return (int) ($result['failed_count'] ?? 0) > 0 ? self::FAILURE : self::SUCCESS;
