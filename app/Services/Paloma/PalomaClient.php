@@ -85,41 +85,51 @@ class PalomaClient
 
     private function mapOffer(SimpleXMLElement $offer): PalomaOfferData
     {
-        $availability = $this->firstXmlNode($offer, [
-            'availabilities.availability',
-            'availability',
-        ]);
+        $availabilityEntries = [];
+        $invalidAvailabilityCount = 0;
 
-        $stock = (int) (
-            $this->attributeText($availability, 'stockCount')
-            ?? $this->firstXmlText($offer, [
-            'availabilities.availability.stockCount',
-            'availability.stockCount',
-            'stockCount',
-            'stock',
-            'quantity',
-            'qty',
-            ])
-            ?? 0
-        );
+        foreach ($this->availabilityNodes($offer) as $availability) {
+            $entry = $this->mapAvailability($availability);
 
-        $availableText = $this->attributeText($availability, 'available')
-            ?? $this->firstXmlText($offer, [
-            'availabilities.availability.available',
-            'availability.available',
-            'available',
-            'inStock',
-            ]);
+            if ($entry instanceof PalomaAvailabilityData) {
+                $availabilityEntries[] = $entry;
+            } else {
+                $invalidAvailabilityCount++;
+            }
+        }
+
+        if ($availabilityEntries === []) {
+            $stockText = $this->firstXmlText($offer, ['stockCount', 'stock', 'quantity', 'qty']);
+            $stock = $this->integerStock($stockText);
+
+            if ($stock === null) {
+                $invalidAvailabilityCount += $stockText === null ? 0 : 1;
+                $stock = 0;
+            }
+
+            $availableText = $this->firstXmlText($offer, ['available', 'inStock']);
+            $available = $this->booleanValue($availableText) ?? $stock > 0;
+            $availabilityEntries[] = new PalomaAvailabilityData(
+                storeId: null,
+                stockCount: $stock,
+                available: $available,
+                payload_hash: hash('sha256', $offer->asXML() ?: ''),
+            );
+        }
+
+        $stockSummary = $this->summarizeAvailabilityEntries($availabilityEntries);
 
         return new PalomaOfferData(
             sku: $this->nullableString($this->attributeText($offer, 'sku') ?? $this->firstXmlText($offer, ['sku', 'SKU', 'code', 'article', 'vendorCode'])),
             model: $this->nullableString($this->firstXmlText($offer, ['model', 'name', 'title'])),
             price: $this->nullableFloat($this->firstXmlText($offer, ['price', 'Price', 'cost'])),
-            stock: $stock,
-            available: $availableText === null
-                ? $stock > 0
-                : filter_var($availableText, FILTER_VALIDATE_BOOLEAN),
+            stock: $stockSummary['stock'],
+            available: $stockSummary['stock'] > 0,
             payload_hash: hash('sha256', $offer->asXML() ?: ''),
+            availability_entries: $availabilityEntries,
+            duplicate_availability_count: $stockSummary['duplicates'],
+            invalid_availability_count: $invalidAvailabilityCount,
+            has_stock_conflict: $stockSummary['conflicts'] > 0,
         );
     }
 
@@ -135,15 +145,39 @@ class PalomaClient
         }
 
         return array_map(
-            fn (array $item): PalomaOfferData => new PalomaOfferData(
-                sku: $this->nullableString($item['sku'] ?? $item['SKU'] ?? $item['code'] ?? $item['article'] ?? null),
-                model: $this->nullableString($item['model'] ?? $item['name'] ?? $item['title'] ?? null),
-                price: $this->nullableFloat($item['price'] ?? $item['Price'] ?? $item['cost'] ?? null),
-                stock: (int) ($item['stockCount'] ?? $item['stock'] ?? $item['quantity'] ?? $item['qty'] ?? 0),
-                available: (bool) ($item['available'] ?? $item['inStock'] ?? (($item['stockCount'] ?? $item['stock'] ?? 0) > 0)),
-                payload_hash: hash('sha256', json_encode($item, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: ''),
-            ),
+            fn (array $item): PalomaOfferData => $this->mapJsonOffer($item),
             $this->jsonOfferNodes($decoded),
+        );
+    }
+
+    private function mapJsonOffer(array $item): PalomaOfferData
+    {
+        $stockText = $item['stockCount'] ?? $item['stock'] ?? $item['quantity'] ?? $item['qty'] ?? null;
+        $stock = $this->integerStock($stockText);
+        $invalidAvailabilityCount = 0;
+
+        if ($stock === null) {
+            $invalidAvailabilityCount = $stockText === null ? 0 : 1;
+            $stock = 0;
+        }
+
+        $available = $this->booleanValue($item['available'] ?? $item['inStock'] ?? null) ?? $stock > 0;
+        $entry = new PalomaAvailabilityData(
+            storeId: $this->nullableString($item['storeId'] ?? $item['storeID'] ?? $item['store'] ?? null),
+            stockCount: $stock,
+            available: $available,
+            payload_hash: hash('sha256', json_encode($item, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: ''),
+        );
+
+        return new PalomaOfferData(
+            sku: $this->nullableString($item['sku'] ?? $item['SKU'] ?? $item['code'] ?? $item['article'] ?? null),
+            model: $this->nullableString($item['model'] ?? $item['name'] ?? $item['title'] ?? null),
+            price: $this->nullableFloat($item['price'] ?? $item['Price'] ?? $item['cost'] ?? null),
+            stock: $entry->effectiveStock(),
+            available: $entry->effectiveStock() > 0,
+            payload_hash: $entry->payload_hash,
+            availability_entries: [$entry],
+            invalid_availability_count: $invalidAvailabilityCount,
         );
     }
 
@@ -192,6 +226,30 @@ class PalomaClient
         return $value === '' ? null : $value;
     }
 
+    private function integerStock(mixed $value): ?int
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $text = trim((string) $value);
+
+        if (! preg_match('/^-?\d+$/', $text)) {
+            return null;
+        }
+
+        return max(0, (int) $text);
+    }
+
+    private function booleanValue(mixed $value): ?bool
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        return filter_var($value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+    }
+
     private function firstXmlText(SimpleXMLElement $node, array $paths): ?string
     {
         $xmlNode = $this->firstXmlNode($node, $paths);
@@ -227,6 +285,94 @@ class PalomaClient
         }
 
         return null;
+    }
+
+    private function mapAvailability(SimpleXMLElement $availability): ?PalomaAvailabilityData
+    {
+        $stock = $this->integerStock(
+            $this->attributeText($availability, 'stockCount')
+                ?? $this->firstXmlText($availability, ['stockCount', 'stock', 'quantity', 'qty'])
+        );
+
+        if ($stock === null) {
+            return null;
+        }
+
+        $available = $this->booleanValue(
+            $this->attributeText($availability, 'available')
+                ?? $this->firstXmlText($availability, ['available', 'inStock'])
+        ) ?? $stock > 0;
+
+        return new PalomaAvailabilityData(
+            storeId: $this->nullableString(
+                $this->attributeText($availability, 'storeId')
+                    ?? $this->attributeText($availability, 'storeID')
+                    ?? $this->attributeText($availability, 'store')
+                    ?? $this->firstXmlText($availability, ['storeId', 'storeID', 'store'])
+            ),
+            stockCount: $stock,
+            available: $available,
+            payload_hash: hash('sha256', $availability->asXML() ?: ''),
+        );
+    }
+
+    /**
+     * @return array<int, SimpleXMLElement>
+     */
+    private function availabilityNodes(SimpleXMLElement $offer): array
+    {
+        $nodes = [];
+
+        foreach ($this->childrenByLocalName($offer, 'availabilities') as $container) {
+            foreach ($this->childrenByLocalName($container, 'availability') as $availability) {
+                $nodes[] = $availability;
+            }
+        }
+
+        foreach ($this->childrenByLocalName($offer, 'availability') as $availability) {
+            $nodes[] = $availability;
+        }
+
+        return $nodes;
+    }
+
+    /**
+     * @param array<int, PalomaAvailabilityData> $entries
+     * @return array{stock: int, duplicates: int, conflicts: int}
+     */
+    private function summarizeAvailabilityEntries(array $entries): array
+    {
+        $seen = [];
+        $stores = [];
+        $duplicates = 0;
+        $conflicts = 0;
+
+        foreach ($entries as $entry) {
+            $duplicateKey = $entry->duplicateKey();
+
+            if (isset($seen[$duplicateKey])) {
+                $duplicates++;
+                continue;
+            }
+
+            $seen[$duplicateKey] = true;
+            $storeKey = $entry->storeKey();
+            $stock = $entry->effectiveStock();
+
+            if (array_key_exists($storeKey, $stores) && $stores[$storeKey] !== $stock) {
+                $conflicts++;
+                $stores[$storeKey] = max($stores[$storeKey], $stock);
+                continue;
+            }
+
+            $stores[$storeKey] = $stock;
+        }
+
+        return [
+            'stock' => array_sum($stores),
+            'duplicates' => $duplicates,
+            'conflicts' => $conflicts,
+        ];
     }
 
     private function attributeText(?SimpleXMLElement $node, string $name): ?string

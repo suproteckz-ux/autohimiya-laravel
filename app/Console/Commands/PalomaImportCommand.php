@@ -163,6 +163,9 @@ class PalomaImportCommand extends Command
             'without_price_count' => collect($rawOffers)->filter(fn (PalomaOfferData $offer): bool => $offer->price === null)->count(),
             'model_conflict_groups' => collect($aggregatedOffers)->filter(fn (PalomaOfferData $offer): bool => $offer->has_model_conflict)->count(),
             'price_conflict_groups' => collect($aggregatedOffers)->filter(fn (PalomaOfferData $offer): bool => $offer->has_price_conflict)->count(),
+            'stock_conflict_groups' => collect($aggregatedOffers)->filter(fn (PalomaOfferData $offer): bool => $offer->has_stock_conflict)->count(),
+            'duplicate_availability_count' => collect($aggregatedOffers)->sum('duplicate_availability_count'),
+            'invalid_availability_count' => collect($aggregatedOffers)->sum('invalid_availability_count'),
         ];
     }
 
@@ -183,6 +186,9 @@ class PalomaImportCommand extends Command
             ['without price', $stats['without_price_count']],
             ['model conflict groups', $stats['model_conflict_groups']],
             ['price conflict groups', $stats['price_conflict_groups']],
+            ['stock conflict groups', $stats['stock_conflict_groups']],
+            ['duplicate availability nodes', $stats['duplicate_availability_count']],
+            ['invalid availability nodes', $stats['invalid_availability_count']],
         ];
     }
 
@@ -228,6 +234,14 @@ class PalomaImportCommand extends Command
 
         if ($offer->has_price_conflict) {
             $errors[] = 'Aggregated Paloma SKU has different prices; minimum price was selected.';
+        }
+
+        if ($offer->has_stock_conflict) {
+            $errors[] = 'Aggregated Paloma SKU has different stock values for the same store; maximum stock was selected for that store.';
+        }
+
+        if ($offer->invalid_availability_count > 0) {
+            $errors[] = 'Paloma availability contained invalid stockCount values that were ignored.';
         }
 
         return $errors === [] ? null : implode(' ', $errors);

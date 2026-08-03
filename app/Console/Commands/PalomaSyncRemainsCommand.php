@@ -40,7 +40,8 @@ class PalomaSyncRemainsCommand extends Command
             ['updated', $result['updated_count'] ?? 0],
             ['created', $result['created_count'] ?? 0],
             ['skipped', $result['skipped_count'] ?? 0],
-            ['not_matched', 0],
+            ['not_matched', $result['not_found_count'] ?? 0],
+            ['absent_zeroed', $result['absent_zeroed_count'] ?? 0],
             ['errors', $result['failed_count'] ?? 0],
         ]);
 
