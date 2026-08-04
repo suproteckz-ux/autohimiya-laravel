@@ -17,6 +17,10 @@ use Throwable;
 
 class KaspiDraftPublisher
 {
+    public function __construct(private readonly KaspiSecureImageDownloader $secureImageDownloader)
+    {
+    }
+
     public function publish(KaspiEnrichmentTask $task, array $options = []): array
     {
         $dryRun = (bool) ($options['dry_run'] ?? false);
@@ -27,6 +31,8 @@ class KaspiDraftPublisher
         $forceAttributes = (bool) ($options['force_attributes'] ?? false);
         $forcePhoto = (bool) ($options['force_photo'] ?? false);
         $forceDescription = (bool) ($options['force_description'] ?? false);
+        $strictImageSecurity = (bool) ($options['strict_image_security'] ?? false);
+        $imageBatchId = (string) ($options['image_batch_id'] ?? ($task->id ?: uniqid('kaspi-', true)));
         $product = $task->product()->with(['images', 'attributes'])->firstOrFail();
         $plan = $this->plan($product, $task, $applyPhoto, $applyDescription, $applyAttributes, $forceAttributes, $forcePhoto, $forceDescription);
         $result = [
@@ -42,9 +48,15 @@ class KaspiDraftPublisher
             return $result;
         }
 
+        $preparedImages = [];
+
         try {
+            if ($strictImageSecurity && $plan['photo']['will_apply']) {
+                $preparedImages = $this->secureImageDownloader->downloadAll($product, $this->taskImages($task), $imageBatchId);
+            }
+
             if ($plan['photo']['will_apply']) {
-                $result['photo']['added'] = $this->publishImages($product, $this->taskImages($task), $forcePhoto);
+                $result['photo']['added'] = $this->publishImages($product, $this->taskImages($task), $forcePhoto, $preparedImages);
             }
 
             if ($plan['description']['will_apply']) {
@@ -63,6 +75,10 @@ class KaspiDraftPublisher
             $task->update(['status' => 'published', 'finished_at' => now(), 'error' => null]);
             $this->log($product, $task, $result, 'success');
         } catch (Throwable $exception) {
+            if ($preparedImages !== []) {
+                $this->secureImageDownloader->cleanup($preparedImages);
+            }
+
             $safeError = Utf8Sanitizer::errorForDb($exception);
             $task->update(['status' => 'failed', 'error' => $safeError, 'finished_at' => now()]);
             $result['errors'][] = $safeError;
@@ -117,7 +133,7 @@ class KaspiDraftPublisher
         ];
     }
 
-    private function publishImages(Product $product, array $images, bool $force = false): int
+    private function publishImages(Product $product, array $images, bool $force = false, array $preparedImages = []): int
     {
         $hadPhotoBeforeImport = ContentScore::hasPhoto($product);
 
@@ -147,7 +163,9 @@ class KaspiDraftPublisher
             }
             $seen[$key] = true;
 
-            $path = $this->downloadImage($product, $url);
+            $path = isset($preparedImages[$url])
+                ? $this->secureImageDownloader->promote($preparedImages[$url])
+                : $this->downloadImage($product, $url);
             if (! $path) {
                 continue;
             }

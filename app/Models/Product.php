@@ -92,6 +92,11 @@ class Product extends Model
         return $this->hasMany(KaspiSyncLog::class);
     }
 
+    public function kaspiProductionPushes(): HasMany
+    {
+        return $this->hasMany(KaspiProductionPush::class);
+    }
+
     public function canShowKaspiCreditButton(): bool
     {
         return filled($this->sku)

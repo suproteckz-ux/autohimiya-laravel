@@ -114,6 +114,7 @@ class KaspiSyncCenter extends Page implements HasTable
                     'category',
                     'brand',
                     'kaspiEnrichmentTasks' => fn ($query) => $query->latest('updated_at'),
+                    'kaspiProductionPushes' => fn ($query) => $query->latest('updated_at'),
                 ])
                 ->withCount(['images', 'attributes', 'kaspiEnrichmentTasks'])
                 ->whereNotNull('sku')
@@ -196,6 +197,19 @@ class KaspiSyncCenter extends Page implements HasTable
                     ->state(fn (Product $record): ?string => $this->latestTask($record)?->updated_at?->format('d.m.Y H:i'))
                     ->placeholder('Нет')
                     ->width('130px'),
+                TextColumn::make('kaspi_production_push')
+                    ->label('Production push')
+                    ->state(fn (Product $record): string => $this->productionPushStatusLabel($record))
+                    ->badge()
+                    ->color(fn (Product $record): string => match ($this->latestProductionPush($record)?->production_status ?: $this->latestProductionPush($record)?->status) {
+                        'imported', 'sent' => 'success',
+                        'unchanged' => 'info',
+                        'manual_content_protected' => 'warning',
+                        'product_not_found', 'failed' => 'danger',
+                        'collected' => 'primary',
+                        default => 'gray',
+                    })
+                    ->width('140px'),
             ])
             ->filters([
                 TernaryFilter::make('has_kaspi_button')
@@ -313,6 +327,20 @@ class KaspiSyncCenter extends Page implements HasTable
                     ->iconButton()
                     ->visible(fn (Product $record): bool => $this->hasKaspiUrl($record))
                     ->action(fn (Product $record): bool => $this->requestAutomationRun(AutomationType::KaspiImportContent, ['product_id' => $record->id, 'limit' => 1, 'force' => false, 'delay_ms' => 3000])),
+                Action::make('collect_local_for_production')
+                    ->label('Collect local')
+                    ->tooltip('Show local CLI dry-run command for this SKU.')
+                    ->icon('heroicon-o-clipboard-document-list')
+                    ->iconButton()
+                    ->visible(fn (Product $record): bool => $this->hasKaspiUrl($record))
+                    ->action(fn (Product $record): bool => $this->showProductionPushCommand([$record->sku], true)),
+                Action::make('push_to_production')
+                    ->label('Push production')
+                    ->tooltip('Show local CLI command that sends this SKU to production.')
+                    ->icon('heroicon-o-paper-airplane')
+                    ->iconButton()
+                    ->visible(fn (Product $record): bool => $this->hasKaspiUrl($record))
+                    ->action(fn (Product $record): bool => $this->showProductionPushCommand([$record->sku], false)),
                 Action::make('import_kaspi_content')
                     ->label('CLI import command')
                     ->tooltip('Показать CLI-команду импорта. Admin не применяет force-import из web-процесса.')
@@ -408,6 +436,11 @@ class KaspiSyncCenter extends Page implements HasTable
                     ->icon('heroicon-o-arrow-down-on-square')
                     ->color('success')
                     ->action(fn (Collection $records): bool => $this->requestAutomationRun(AutomationType::KaspiImportContent, ['ids' => $records->pluck('id')->implode(','), 'limit' => $records->count(), 'force' => true, 'delay_ms' => 3000])),
+                BulkAction::make('push_selected_to_production')
+                    ->label('Collect and push production')
+                    ->icon('heroicon-o-paper-airplane')
+                    ->requiresConfirmation()
+                    ->action(fn (Collection $records): bool => $this->showProductionPushCommand($records->pluck('sku')->filter()->values()->all(), false)),
                 BulkAction::make('create_tasks')
                     ->label('Создать задачи')
                     ->icon('heroicon-o-clipboard-document-check')
@@ -733,6 +766,41 @@ class KaspiSyncCenter extends Page implements HasTable
         }
 
         return $product->kaspiEnrichmentTasks->sortByDesc('updated_at')->first();
+    }
+
+    public function latestProductionPush(Product $product): ?\App\Models\KaspiProductionPush
+    {
+        if (! $product->relationLoaded('kaspiProductionPushes')) {
+            $product->load(['kaspiProductionPushes' => fn ($query) => $query->latest('updated_at')]);
+        }
+
+        return $product->kaspiProductionPushes->sortByDesc('updated_at')->first();
+    }
+
+    public function productionPushStatusLabel(Product $product): string
+    {
+        $push = $this->latestProductionPush($product);
+        if (! $push) {
+            return 'not collected';
+        }
+
+        return $push->production_status ?: $push->status;
+    }
+
+    public function showProductionPushCommand(array $skus, bool $dryRun): bool
+    {
+        $skus = array_values(array_filter($skus, 'filled'));
+        $skuFlags = implode(' ', array_map(fn (string $sku): string => '--sku='.escapeshellarg($sku), $skus));
+        $command = trim('php artisan kaspi:push-production '.$skuFlags.($dryRun ? ' --dry-run' : ''));
+
+        Notification::make()
+            ->title($dryRun ? 'Kaspi local collect dry-run' : 'Kaspi push to production')
+            ->body($command)
+            ->info()
+            ->persistent()
+            ->send();
+
+        return true;
     }
 
     public function importStatusLabel(Product $product): string
