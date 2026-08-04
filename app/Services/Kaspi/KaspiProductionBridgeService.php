@@ -101,9 +101,13 @@ class KaspiProductionBridgeService
         }
 
         $kaspiUrl = (string) ($candidate['kaspi_product_url'] ?? '');
+        $resolutionMethod = 'existing';
         if (blank($kaspiUrl)) {
-            $resolved = $this->urlResolver->resolve($sku, (string) ($candidate['name'] ?? ''), $debug);
+            $resolved = $this->urlResolver->resolve($sku, (string) ($candidate['name'] ?? ''), $debug, [
+                'storefront_url' => $candidate['storefront_url'] ?? null,
+            ]);
             $kaspiUrl = (string) $resolved['url'];
+            $resolutionMethod = (string) ($resolved['method'] ?? 'unknown');
         }
 
         $collected = $this->collector->collectUrl($kaspiUrl, $sku, $debug);
@@ -127,6 +131,7 @@ class KaspiProductionBridgeService
             'source' => [
                 'collector' => 'local-playwright',
                 'parser_version' => '1',
+                'url_resolution_method' => $resolutionMethod,
             ],
         ];
         $this->validator->validate($payload, strlen(json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)));
@@ -223,6 +228,7 @@ class KaspiProductionBridgeService
             'sku' => $candidate['sku'] ?? $push?->sku,
             'candidate_status' => $this->candidateStatus($candidate),
             'kaspi_url' => $push?->kaspi_url ?: ($candidate['kaspi_product_url'] ?? null),
+            'resolution_method' => data_get($payload, 'source.url_resolution_method', filled($candidate['kaspi_product_url'] ?? null) ? 'existing' : null),
             'image_count' => count((array) data_get($payload, 'content.images', [])),
             'description_present' => filled(data_get($payload, 'content.description')),
             'attribute_count' => count((array) data_get($payload, 'content.attributes', [])),

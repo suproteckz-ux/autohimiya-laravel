@@ -32,11 +32,12 @@ class KaspiPushProductionCommand extends Command
             return self::FAILURE;
         }
 
-        $this->table(['SKU', 'Candidate', 'Kaspi URL', 'Images', 'Description', 'Attributes', 'Payload', 'Status', 'Message', 'Request ID'], array_map(
+        $this->table(['SKU', 'Candidate', 'Kaspi URL', 'Resolution', 'Images', 'Description', 'Attributes', 'Payload', 'Status', 'Message', 'Request ID'], array_map(
             fn (array $row): array => [
                 $row['sku'],
                 $row['candidate_status'] ?? '',
                 $row['kaspi_url'] ?? '',
+                $row['resolution_method'] ?? '',
                 $row['image_count'] ?? 0,
                 ($row['description_present'] ?? false) ? 'yes' : 'no',
                 $row['attribute_count'] ?? 0,

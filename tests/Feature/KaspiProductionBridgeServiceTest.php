@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\KaspiProductionPush;
 use App\Services\Kaspi\KaspiLocalPageCollector;
+use App\Services\Kaspi\KaspiLocalNodeProcessRunner;
 use App\Services\Kaspi\KaspiLocalUrlResolver;
 use App\Services\Kaspi\KaspiProductionBridgeService;
 use App\Services\Kaspi\KaspiProductionCandidateClient;
@@ -267,6 +268,119 @@ class KaspiProductionBridgeServiceTest extends TestCase
         );
     }
 
+    public function test_local_url_resolver_prefers_widget_and_builds_storefront_url_from_name(): void
+    {
+        config(['app.url' => 'https://xn--80aesatk1az7g.kz']);
+        $runner = $this->fakeNodeRunner([
+            $this->processJson(['ok' => true, 'sku' => 'FDB060', 'url' => 'https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/?ksWidget=true&m=30366013', 'method' => 'widget', 'reason' => null]),
+        ]);
+
+        $result = (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji щетка для чернения шин 6х6 см FDB060', true);
+
+        $this->assertSame('https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/', $result['url']);
+        $this->assertSame('widget', $result['method']);
+        $this->assertCount(1, $runner->runs);
+        $this->assertStringEndsWith('scripts/kaspi-widget-resolver.mjs', str_replace('\\', '/', $runner->runs[0]['script']));
+        $this->assertStringContainsString('/product/mitsiji-schetka-dlya-cherneniya-shin-6h6-sm-fdb060', $runner->runs[0]['arguments']['url']);
+        $this->assertSame(base_path(), $runner->runs[0]['cwd']);
+    }
+
+    public function test_existing_production_url_skips_widget_and_search_resolution(): void
+    {
+        $runner = $this->fakeNodeRunner([]);
+
+        $result = (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Ignored', true, [
+            'existing_url' => 'https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/?m=30366013',
+        ]);
+
+        $this->assertSame('https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/', $result['url']);
+        $this->assertSame('existing', $result['method']);
+        $this->assertSame([], $runner->runs);
+    }
+
+    public function test_widget_not_found_triggers_conservative_search_fallback(): void
+    {
+        $runner = $this->fakeNodeRunner([
+            $this->processJson(['ok' => false, 'sku' => 'FDB060', 'url' => null, 'method' => 'widget', 'reason' => 'not_found']),
+            $this->processJson(['ok' => true, 'sku' => 'FDB060', 'url' => 'https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/', 'method' => 'search', 'reason' => null]),
+        ]);
+
+        $result = (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji щетка', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
+
+        $this->assertSame('search', $result['method']);
+        $this->assertCount(2, $runner->runs);
+        $this->assertStringEndsWith('scripts/kaspi-search-url-resolver.mjs', str_replace('\\', '/', $runner->runs[1]['script']));
+    }
+
+    public function test_widget_browser_error_is_reported_without_search_fallback(): void
+    {
+        $runner = $this->fakeNodeRunner([
+            $this->processJson(['ok' => false, 'sku' => 'FDB060', 'url' => null, 'method' => 'widget', 'reason' => 'browser_error'], exitCode: 1, stderr: 'browser failed'),
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('url_resolver_browser_error');
+
+        try {
+            (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji щетка', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
+        } finally {
+            $this->assertCount(1, $runner->runs);
+        }
+    }
+
+    public function test_resolver_reports_empty_stdout_malformed_json_noise_and_nonzero_exit(): void
+    {
+        foreach ([
+            ['', 0, '', 'url_resolver_empty_stdout'],
+            ['{bad json', 0, '', 'url_resolver_invalid_json'],
+            ['progress'.PHP_EOL.'{"ok":true}', 0, '', 'url_resolver_invalid_json'],
+            [json_encode(['ok' => false, 'sku' => 'FDB060', 'url' => null, 'method' => 'widget', 'reason' => 'not_found']), 1, '', 'url_resolver_nonzero_exit'],
+        ] as [$stdout, $exitCode, $stderr, $message]) {
+            $runner = $this->fakeNodeRunner([$this->process($stdout, $exitCode, $stderr)]);
+
+            try {
+                (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji щетка', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
+                $this->fail('Expected resolver exception.');
+            } catch (\RuntimeException $exception) {
+                $this->assertStringContainsString($message, $exception->getMessage());
+                $this->assertStringContainsString('stdout_bytes', $exception->getMessage());
+            }
+        }
+    }
+
+    public function test_resolver_accepts_bom_json_and_stderr_warnings(): void
+    {
+        $runner = $this->fakeNodeRunner([
+            $this->process("\xEF\xBB\xBF".json_encode(['ok' => true, 'sku' => 'FDB060', 'url' => 'https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/', 'method' => 'widget', 'reason' => null]), 0, 'warning on stderr'),
+        ]);
+
+        $result = (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji щетка', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
+
+        $this->assertSame('https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/', $result['url']);
+        $this->assertSame(17, $result['diagnostics']['stderr_bytes']);
+    }
+
+    public function test_resolver_rejects_invalid_hosts_non_https_non_product_paths_and_sku_mismatch(): void
+    {
+        foreach ([
+            'https://example.test/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/',
+            'http://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/',
+            'https://kaspi.kz/shop/search/?text=FDB060',
+            'https://kaspi.kz/shop/p/another-product-123/',
+        ] as $url) {
+            $runner = $this->fakeNodeRunner([
+                $this->processJson(['ok' => true, 'sku' => 'FDB060', 'url' => $url, 'method' => 'widget', 'reason' => null]),
+            ]);
+
+            try {
+                (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji щетка', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
+                $this->fail('Expected invalid URL exception.');
+            } catch (\RuntimeException $exception) {
+                $this->assertContains($exception->getMessage(), ['url_resolver_invalid_url', 'url_resolver_sku_mismatch']);
+            }
+        }
+    }
+
     private function payload(string $sku): array
     {
         return [
@@ -340,12 +454,60 @@ class KaspiProductionBridgeServiceTest extends TestCase
         return new class extends KaspiLocalUrlResolver {
             public array $skus = [];
 
-            public function resolve(string $sku, ?string $name = null, bool $debug = false): array
+            public function resolve(string $sku, ?string $name = null, bool $debug = false, array $options = []): array
             {
                 $this->skus[] = $sku;
 
-                return ['url' => 'https://kaspi.kz/shop/p/resolved-'.str_replace('_', '-', $sku).'/', 'status' => 'resolved'];
+                return ['url' => 'https://kaspi.kz/shop/p/resolved-'.str_replace('_', '-', $sku).'/', 'status' => 'resolved', 'method' => 'widget'];
             }
         };
+    }
+
+    private function fakeNodeRunner(array $responses): KaspiLocalNodeProcessRunner
+    {
+        return new class($responses) extends KaspiLocalNodeProcessRunner {
+            public array $runs = [];
+
+            public function __construct(private array $responses)
+            {
+            }
+
+            public function run(string $script, array $arguments, int $timeoutSeconds = 90): array
+            {
+                $this->runs[] = [
+                    'script' => $script,
+                    'arguments' => $arguments,
+                    'timeout' => $timeoutSeconds,
+                    'cwd' => base_path(),
+                ];
+
+                $response = array_shift($this->responses) ?: ['stdout' => '', 'stderr' => '', 'exit_code' => 1];
+                $command = ['node', $script];
+                foreach ($arguments as $name => $value) {
+                    if ($value !== null) {
+                        $command[] = '--'.$name.'='.(is_bool($value) ? ($value ? 'true' : 'false') : (string) $value);
+                    }
+                }
+
+                return [
+                    'command' => $command,
+                    'script' => $script,
+                    'cwd' => base_path(),
+                    'exit_code' => $response['exit_code'],
+                    'stdout' => $response['stdout'],
+                    'stderr' => $response['stderr'],
+                ];
+            }
+        };
+    }
+
+    private function processJson(array $payload, int $exitCode = 0, string $stderr = ''): array
+    {
+        return $this->process(json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), $exitCode, $stderr);
+    }
+
+    private function process(string $stdout, int $exitCode = 0, string $stderr = ''): array
+    {
+        return ['stdout' => $stdout, 'stderr' => $stderr, 'exit_code' => $exitCode];
     }
 }

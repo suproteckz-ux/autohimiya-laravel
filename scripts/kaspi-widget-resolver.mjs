@@ -1,4 +1,3 @@
-import { chromium } from 'playwright';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -17,8 +16,30 @@ function boolArg(name, fallback = false) {
   return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
 }
 
+function reasonForStatus(status) {
+  if (['widget_not_found', 'kaspi_js_not_loaded', 'kaspi_button_not_found', 'kaspi_url_not_opened', 'invalid_kaspi_url'].includes(status)) {
+    return 'not_found';
+  }
+
+  if (['error', 'widget_timeout'].includes(status)) {
+    return 'browser_error';
+  }
+
+  return status || 'browser_error';
+}
+
 function output(payload) {
+  const status = payload.status || 'error';
+  const url = payload.url || payload.resolved_kaspi_url || null;
+  const ok = payload.ok ?? (status === 'resolved_from_widget' && Boolean(url));
+  const reason = payload.reason ?? (ok ? null : reasonForStatus(status));
+
   process.stdout.write(JSON.stringify({
+    ok,
+    sku,
+    url,
+    method: ok ? 'widget' : (reason === 'invalid_input' ? null : 'widget'),
+    reason,
     widget_found: false,
     button_found: false,
     resolved_kaspi_url: null,
@@ -215,7 +236,9 @@ async function clickWidget(page, context) {
 }
 
 const url = arg('url');
+const sku = arg('sku', null);
 const headless = boolArg('headless', false);
+const debug = boolArg('debug', false);
 const delayMs = Number.parseInt(arg('delay-ms', '5000'), 10);
 const timeoutMs = Number.parseInt(arg('timeout-ms', '60000'), 10);
 const artifactDir = arg('artifact-dir');
@@ -224,7 +247,7 @@ let currentStep = 'init';
 let lastHttpStatus = null;
 
 if (!url) {
-  output({ status: 'error', error: 'Missing --url.', artifact_dir: artifactDir, current_step: currentStep });
+  output({ ok: false, status: 'error', reason: 'invalid_input', method: null, error: 'Missing --url.', artifact_dir: artifactDir, current_step: currentStep });
   process.exit(1);
 }
 
@@ -232,6 +255,7 @@ let browser;
 let page;
 
 try {
+  const { chromium } = await import('playwright');
   browser = await chromium.launch({ headless });
   const context = await browser.newContext({
     viewport: { width: 1440, height: 1000 },
@@ -267,6 +291,10 @@ try {
   const directUrl = await firstKaspiUrl(context, page);
   if (directUrl) {
     output({
+      ok: true,
+      url: directUrl,
+      method: 'widget',
+      reason: null,
       status: 'resolved_from_widget',
       widget_found: true,
       button_found: true,
@@ -289,6 +317,10 @@ try {
 
   if (clicked.url) {
     output({
+      ok: true,
+      url: clicked.url,
+      method: 'widget',
+      reason: null,
       status: 'resolved_from_widget',
       widget_found: true,
       button_found: true,
@@ -307,7 +339,10 @@ try {
   const message = error instanceof Error ? error.message : String(error);
   const status = message.toLowerCase().includes('timeout') ? 'widget_timeout' : 'error';
   if (page) await saveArtifacts(page, artifactDir, message, consoleLines);
-  output({ status, error: message, artifact_dir: artifactDir, current_step: currentStep, page_url: page ? page.url() : null, http_status: lastHttpStatus, timeout: status === 'widget_timeout', exception_class: error instanceof Error ? error.name : null, captcha: page ? await hasCaptcha(page) : false });
+  if (debug && error instanceof Error && error.stack) {
+    process.stderr.write(error.stack + '\n');
+  }
+  output({ ok: false, status, reason: 'browser_error', error: message, artifact_dir: artifactDir, current_step: currentStep, page_url: page ? page.url() : null, http_status: lastHttpStatus, timeout: status === 'widget_timeout', exception_class: error instanceof Error ? error.name : null, captcha: page ? await hasCaptcha(page) : false });
   process.exitCode = 1;
 } finally {
   if (browser) await browser.close().catch(() => {});

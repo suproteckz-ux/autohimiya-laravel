@@ -31,6 +31,7 @@ return [
         'production_api_token' => env('KASPI_PRODUCTION_API_TOKEN'),
         'production_import_rate_limit' => (int) env('KASPI_IMPORT_API_RATE_LIMIT', 30),
         'production_payload_max_bytes' => (int) env('KASPI_IMPORT_PAYLOAD_MAX_BYTES', 262144),
+        'node_binary' => env('KASPI_NODE_BINARY', 'node'),
         'image_allowed_hosts' => array_values(array_filter(array_map('trim', explode(',', env('KASPI_IMAGE_ALLOWED_HOSTS', 'resources.cdn-kaspi.kz,kaspi.kz'))))),
         'image_connect_timeout' => (int) env('KASPI_IMAGE_CONNECT_TIMEOUT', 5),
         'image_timeout' => (int) env('KASPI_IMAGE_TIMEOUT', 15),
