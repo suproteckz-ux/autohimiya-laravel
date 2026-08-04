@@ -30,8 +30,6 @@ class CategoryTreeService
         $visibleProducts = DB::table('products')
             ->whereNull('deleted_at')
             ->whereIn('product_status', $statuses)
-            ->where('availability', true)
-            ->where('quantity', '>', 0)
             ->where('price', '>', 0)
             ->whereNotNull('slug')
             ->where('slug', '<>', '')

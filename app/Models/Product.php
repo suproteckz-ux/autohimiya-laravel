@@ -122,8 +122,6 @@ class Product extends Model
     {
         return $query
             ->whereIn('product_status', ProductStatus::visibleValues())
-            ->where('availability', true)
-            ->where('quantity', '>', 0)
             ->where('price', '>', 0)
             ->whereNotNull('category_id')
             ->whereNotNull('slug')
@@ -144,8 +142,6 @@ class Product extends Model
     public function isAvailableForStorefront(): bool
     {
         return ProductStatus::isVisibleStatus((string) $this->product_status)
-            && (bool) $this->availability
-            && (int) $this->quantity > 0
             && (float) $this->price > 0
             && filled($this->category_id)
             && filled($this->slug);

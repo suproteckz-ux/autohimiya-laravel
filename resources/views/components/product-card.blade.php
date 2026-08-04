@@ -26,7 +26,7 @@
 
     <div class="product-bottom">
         <div class="price">{{ number_format((float) $product->price, 0, '.', ' ') }} ₸</div>
-        <div class="stock {{ $isAvailable ? 'is-in-stock' : 'is-low-stock' }}">{{ $isAvailable ? 'В наличии' : 'Уточняйте наличие' }}</div>
+        <div class="stock {{ $isAvailable ? 'is-in-stock' : 'is-low-stock' }}">@if($isAvailable)&#1042; &#1085;&#1072;&#1083;&#1080;&#1095;&#1080;&#1080;@else&#1053;&#1077;&#1090; &#1074; &#1085;&#1072;&#1083;&#1080;&#1095;&#1080;&#1080;@endif</div>
         @if($sku)
             <div class="sku">SKU: {{ $sku }}</div>
         @endif

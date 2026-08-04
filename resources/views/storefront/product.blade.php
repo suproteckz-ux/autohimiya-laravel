@@ -90,7 +90,7 @@
 
                     <div class="buybox">
                         <div class="summary-price">{{ number_format((float) $product->price, 0, '.', ' ') }} ₸</div>
-                        <div class="summary-stock {{ $isAvailable ? 'is-in-stock' : 'is-low-stock' }}">{{ $isAvailable ? 'В наличии' : 'Уточняйте наличие' }}</div>
+                        <div class="summary-stock {{ $isAvailable ? 'is-in-stock' : 'is-low-stock' }}">@if($isAvailable)&#1042; &#1085;&#1072;&#1083;&#1080;&#1095;&#1080;&#1080;@else&#1053;&#1077;&#1090; &#1074; &#1085;&#1072;&#1083;&#1080;&#1095;&#1080;&#1080;@endif</div>
 
                         <dl class="summary-list">
                             @if($brandName !== '')<div><dt>Бренд</dt><dd>{{ $brandName }}</dd></div>@endif
