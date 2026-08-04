@@ -6,6 +6,7 @@ use App\Models\Brand;
 use App\Models\Category;
 use App\Models\KaspiImportReceipt;
 use App\Models\Product;
+use App\Models\ProductAttribute;
 use App\Models\ProductImage;
 use App\Support\ProductStatus;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -105,6 +106,36 @@ class KaspiProductionImportApiTest extends TestCase
 
         $response->assertOk();
         $this->assertNotContains('protected', collect($response->json('data'))->pluck('sku')->all());
+    }
+
+    public function test_candidate_debug_diagnostics_explain_filter_rejections_and_requested_sku(): void
+    {
+        $this->product('manual_debug', ['description' => '', 'photos_are_manual' => true]);
+        $complete = $this->product('aut_608', ['description' => 'Has description']);
+        ProductImage::query()->create(['product_id' => $complete->id, 'path' => 'products/existing.jpg']);
+        ProductAttribute::query()->create(['product_id' => $complete->id, 'name' => 'Volume', 'value' => '1 L']);
+        $this->product('missing_url', ['description' => 'Has description', 'kaspi_product_url' => null]);
+
+        $global = $this->withToken('secret-token')->getJson('/api/internal/kaspi-content/candidates?limit=10&debug=true');
+        $global->assertOk();
+        $this->assertSame(3, $global->json('diagnostics.total_products'));
+        $this->assertSame(1, $global->json('diagnostics.rejected.manual_content_protected'));
+        $this->assertSame(1, $global->json('diagnostics.rejected.has_images'));
+        $this->assertSame(1, $global->json('diagnostics.rejected.has_description'));
+        $this->assertSame(0, $global->json('diagnostics.rejected.has_attributes'));
+        $this->assertSame(0, $global->json('diagnostics.rejected.missing_kaspi_url'));
+
+        $sku = $this->withToken('secret-token')->getJson('/api/internal/kaspi-content/candidates?sku[]=aut_608&limit=1&debug=true');
+        $sku->assertOk();
+        $this->assertSame([], $sku->json('data'));
+        $this->assertSame(2, $sku->json('diagnostics.rejected.sku_filter'));
+        $this->assertSame('aut_608', $sku->json('diagnostics.requested_skus.0.sku'));
+        $this->assertFalse($sku->json('diagnostics.requested_skus.0.manual_content_protected'));
+        $this->assertTrue($sku->json('diagnostics.requested_skus.0.has_images'));
+        $this->assertTrue($sku->json('diagnostics.requested_skus.0.has_description'));
+        $this->assertTrue($sku->json('diagnostics.requested_skus.0.has_attributes'));
+        $this->assertSame('present', $sku->json('diagnostics.requested_skus.0.kaspi_url'));
+        $this->assertSame('has_images_and_has_description', $sku->json('diagnostics.requested_skus.0.excluded_because'));
     }
 
     public function test_candidate_pagination_cursor_does_not_duplicate_products(): void

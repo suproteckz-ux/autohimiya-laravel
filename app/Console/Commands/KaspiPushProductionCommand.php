@@ -48,8 +48,46 @@ class KaspiPushProductionCommand extends Command
             $result['rows'],
         ));
         $this->table(['Metric', 'Count'], collect($result['metrics'])->map(fn (int $count, string $metric): array => [$metric, $count])->values()->all());
+        $this->printCandidateDiagnostics((array) ($result['candidate_diagnostics'] ?? []));
         $this->info($result['message']);
 
         return $result['successful'] ? self::SUCCESS : self::FAILURE;
+    }
+
+    private function printCandidateDiagnostics(array $diagnostics): void
+    {
+        if ($diagnostics === []) {
+            return;
+        }
+
+        $this->line('Candidate diagnostics');
+        $this->line('Total products: '.(int) ($diagnostics['total_products'] ?? 0));
+        $this->table(['Filter', 'Rejected'], collect((array) ($diagnostics['rejected'] ?? []))
+            ->map(fn (int $count, string $filter): array => [$filter, $count])
+            ->values()
+            ->all());
+
+        foreach ((array) ($diagnostics['requested_skus'] ?? []) as $skuDiagnostic) {
+            if (! is_array($skuDiagnostic)) {
+                continue;
+            }
+
+            $this->line('SKU: '.($skuDiagnostic['sku'] ?? ''));
+            $this->line('manual_content_protected = '.$this->formatDiagnosticValue($skuDiagnostic['manual_content_protected'] ?? null));
+            $this->line('has_images = '.$this->formatDiagnosticValue($skuDiagnostic['has_images'] ?? null));
+            $this->line('has_description = '.$this->formatDiagnosticValue($skuDiagnostic['has_description'] ?? null));
+            $this->line('has_attributes = '.$this->formatDiagnosticValue($skuDiagnostic['has_attributes'] ?? null));
+            $this->line('kaspi_url = '.($skuDiagnostic['kaspi_url'] ?? 'missing'));
+            $this->line('excluded because '.$skuDiagnostic['excluded_because']);
+        }
+    }
+
+    private function formatDiagnosticValue(mixed $value): string
+    {
+        return match ($value) {
+            true => 'true',
+            false => 'false',
+            default => 'unknown',
+        };
     }
 }

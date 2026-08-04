@@ -191,6 +191,50 @@ class KaspiProductionBridgeServiceTest extends TestCase
         $this->assertStringNotContainsString('local-secret', Artisan::output());
     }
 
+    public function test_debug_command_prints_candidate_exclusion_reason_for_requested_sku(): void
+    {
+        Http::fake(['production.test/*' => Http::response([
+            'data' => [],
+            'next_cursor' => null,
+            'diagnostics' => [
+                'total_products' => 1,
+                'returned_candidate_count' => 0,
+                'rejected' => [
+                    'manual_content_protected' => 0,
+                    'has_images' => 1,
+                    'has_description' => 1,
+                    'has_attributes' => 0,
+                    'missing_kaspi_url' => 0,
+                    'sku_filter' => 0,
+                    'other' => 0,
+                ],
+                'requested_skus' => [[
+                    'sku' => 'aut_608',
+                    'found' => true,
+                    'manual_content_protected' => false,
+                    'has_images' => true,
+                    'has_description' => true,
+                    'has_attributes' => false,
+                    'kaspi_url' => 'present',
+                    'excluded_because' => 'has_images_and_has_description',
+                ]],
+            ],
+        ], 200)]);
+
+        Artisan::call('kaspi:push-production', ['--sku' => ['aut_608'], '--dry-run' => true, '--debug' => true]);
+
+        $output = Artisan::output();
+        $this->assertStringContainsString('Total products: 1', $output);
+        $this->assertStringContainsString('SKU: aut_608', $output);
+        $this->assertStringContainsString('manual_content_protected = false', $output);
+        $this->assertStringContainsString('has_images = true', $output);
+        $this->assertStringContainsString('has_description = true', $output);
+        $this->assertStringContainsString('has_attributes = false', $output);
+        $this->assertStringContainsString('kaspi_url = present', $output);
+        $this->assertStringContainsString('excluded because has_images_and_has_description', $output);
+        Http::assertSent(fn ($request): bool => str_contains((string) $request->url(), 'debug=true'));
+    }
+
     public function test_local_command_works_without_local_product_record_and_uses_candidate_sku_and_url(): void
     {
         $collector = $this->fakeCollector();

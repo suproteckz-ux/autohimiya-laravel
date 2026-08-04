@@ -89,6 +89,7 @@ class KaspiProductionBridgeService
             'message' => 'Kaspi production push complete. Products checked: '.count($candidates),
             'metrics' => $metrics,
             'rows' => $rows,
+            'candidate_diagnostics' => $debug ? $this->candidateClient->diagnostics() : [],
         ];
     }
 

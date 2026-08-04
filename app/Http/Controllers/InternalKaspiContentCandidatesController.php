@@ -26,6 +26,7 @@ class InternalKaspiContentCandidatesController extends Controller
             'page' => $request->query('page'),
             'missing' => $request->query('missing', 'content'),
             'include_protected' => $request->query('include_protected', false),
+            'debug' => $request->query('debug', false),
         ]));
     }
 }

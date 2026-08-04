@@ -6,6 +6,8 @@ use Illuminate\Support\Facades\Http;
 
 class KaspiProductionCandidateClient
 {
+    private array $lastDiagnostics = [];
+
     /**
      * @return array<int, array<string, mixed>>
      */
@@ -30,6 +32,10 @@ class KaspiProductionCandidateClient
                 'include_protected' => 'false',
             ];
 
+            if ((bool) ($options['debug'] ?? false)) {
+                $query['debug'] = 'true';
+            }
+
             if (filled($cursor)) {
                 $query['cursor'] = $cursor;
             }
@@ -52,6 +58,10 @@ class KaspiProductionCandidateClient
                 throw new \RuntimeException('candidate_invalid_json');
             }
 
+            if (isset($body['diagnostics']) && is_array($body['diagnostics'])) {
+                $this->lastDiagnostics = $body['diagnostics'];
+            }
+
             foreach ((array) ($body['data'] ?? []) as $candidate) {
                 if (is_array($candidate)) {
                     $candidates[] = $candidate;
@@ -63,6 +73,11 @@ class KaspiProductionCandidateClient
         } while ($cursor && $remaining > 0);
 
         return $candidates;
+    }
+
+    public function diagnostics(): array
+    {
+        return $this->lastDiagnostics;
     }
 
     private function candidateUrl(): string
