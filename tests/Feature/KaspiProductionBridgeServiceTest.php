@@ -285,6 +285,24 @@ class KaspiProductionBridgeServiceTest extends TestCase
         $this->assertSame(base_path(), $runner->runs[0]['cwd']);
     }
 
+    public function test_local_url_resolver_does_not_prefix_www_for_loopback_storefront_urls(): void
+    {
+        foreach (['http://127.0.0.1:8001', 'http://localhost:8001'] as $appUrl) {
+            config(['app.url' => $appUrl]);
+            $runner = $this->fakeNodeRunner([
+                $this->processJson(['ok' => false, 'sku' => 'FDB060', 'url' => null, 'method' => 'widget', 'reason' => 'not_found']),
+                $this->processJson(['ok' => true, 'sku' => 'FDB060', 'url' => 'https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/', 'method' => 'search', 'reason' => null]),
+            ]);
+
+            $result = (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Loopback product', true);
+
+            $this->assertSame('search', $result['method']);
+            $this->assertCount(2, $runner->runs);
+            $this->assertStringStartsWith($appUrl.'/product/', $runner->runs[0]['arguments']['url']);
+            $this->assertStringNotContainsString('www.127.0.0.1', $runner->runs[0]['arguments']['url']);
+            $this->assertStringNotContainsString('www.localhost', $runner->runs[0]['arguments']['url']);
+        }
+    }
     public function test_existing_production_url_skips_widget_and_search_resolution(): void
     {
         $runner = $this->fakeNodeRunner([]);

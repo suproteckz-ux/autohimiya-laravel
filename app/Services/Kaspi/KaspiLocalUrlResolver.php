@@ -162,7 +162,7 @@ class KaspiLocalUrlResolver
         $variants = [$base];
         $parts = parse_url($base);
         $host = (string) ($parts['host'] ?? '');
-        if ($host !== '' && ! str_starts_with($host, 'www.')) {
+        if ($host !== '' && ! str_starts_with($host, 'www.') && ! $this->isLoopbackOrIpHost($host)) {
             $scheme = (string) ($parts['scheme'] ?? 'https');
             $port = isset($parts['port']) ? ':'.$parts['port'] : '';
             $variants[] = $scheme.'://www.'.$host.$port;
@@ -171,6 +171,14 @@ class KaspiLocalUrlResolver
         return array_values(array_unique($variants));
     }
 
+    private function isLoopbackOrIpHost(string $host): bool
+    {
+        $host = mb_strtolower(trim($host, '[]'));
+
+        return $host === 'localhost'
+            || str_ends_with($host, '.localhost')
+            || filter_var($host, FILTER_VALIDATE_IP) !== false;
+    }
     private function resolved(array $payload): array
     {
         return [
