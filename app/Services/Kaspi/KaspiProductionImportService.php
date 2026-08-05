@@ -38,25 +38,6 @@ class KaspiProductionImportService
             ];
         }
 
-        $sameContent = KaspiImportReceipt::query()
-            ->where('normalized_sku', $normalizedSku)
-            ->where('content_hash', $contentHash)
-            ->whereIn('status', ['imported', 'unchanged'])
-            ->latest('id')
-            ->first();
-
-        if ($sameContent) {
-            $body = [
-                'ok' => true,
-                'status' => 'unchanged',
-                'request_id' => $requestId,
-                'sku' => $sku,
-            ];
-            $this->storeReceipt($payload, $contentHash, $normalizedSku, 'unchanged', $body);
-
-            return ['http_status' => 200, 'body' => $body];
-        }
-
         $products = $this->matchingProducts($normalizedSku);
         if ($products->count() === 0) {
             $body = ['ok' => false, 'error' => 'product_not_found', 'sku' => $sku];
@@ -73,6 +54,25 @@ class KaspiProductionImportService
         }
 
         $product = $products->first();
+        $sameContent = KaspiImportReceipt::query()
+            ->where('normalized_sku', $normalizedSku)
+            ->where('content_hash', $contentHash)
+            ->whereIn('status', ['imported', 'unchanged'])
+            ->latest('id')
+            ->first();
+
+        if ($sameContent && $this->productContainsPayloadContent($product, $payload)) {
+            $body = [
+                'ok' => true,
+                'status' => 'unchanged',
+                'request_id' => $requestId,
+                'sku' => $sku,
+            ];
+            $this->storeReceipt($payload, $contentHash, $normalizedSku, 'unchanged', $body);
+
+            return ['http_status' => 200, 'body' => $body];
+        }
+
         $manualBlock = $this->manualBlockReason($product, $payload);
         if ($manualBlock !== null) {
             $body = ['ok' => false, 'error' => 'manual_content_protected', 'sku' => $sku, 'reason' => $manualBlock];
@@ -206,6 +206,29 @@ class KaspiProductionImportService
             ->values();
     }
 
+    private function productContainsPayloadContent(Product $product, array $payload): bool
+    {
+        $product->refresh()->load(['images', 'attributes']);
+        $content = (array) $payload['content'];
+        $incomingImages = (array) ($content['images'] ?? []);
+        $incomingDescription = $content['description'] ?? null;
+        $incomingAttributes = $this->payloadAttributes($payload);
+
+        if ($incomingImages !== [] && ! ContentScore::hasPhoto($product)) {
+            return false;
+        }
+
+        if (MeaningfulContent::hasDescription($incomingDescription) && MeaningfulContent::descriptionIsEmpty($product->description)) {
+            return false;
+        }
+
+        if ($incomingAttributes !== [] && ! $product->attributes()->exists()) {
+            return false;
+        }
+
+        return true;
+    }
+
     private function manualBlockReason(Product $product, array $payload): ?string
     {
         if ((bool) $product->auto_content_locked) {
@@ -215,13 +238,13 @@ class KaspiProductionImportService
         $content = (array) $payload['content'];
         $incomingImages = (array) ($content['images'] ?? []);
         $incomingDescription = $content['description'] ?? null;
-        $incomingAttributes = (array) ($content['attributes'] ?? []);
+        $incomingAttributes = $this->payloadAttributes($payload);
         $hasPhoto = ContentScore::hasPhoto($product);
         $hasDescription = MeaningfulContent::hasDescription($product->description);
         $hasAttributes = $product->attributes()->exists();
         $hasImportableMissingField = ($incomingImages !== [] && ! $hasPhoto)
             || (MeaningfulContent::hasDescription($incomingDescription) && ! $hasDescription)
-            || ($incomingAttributes !== [] && ! $hasAttributes && ! (bool) $product->attributes_are_manual);
+            || ($incomingAttributes !== [] && ! $hasAttributes);
 
         if ($hasImportableMissingField) {
             return null;
@@ -240,6 +263,14 @@ class KaspiProductionImportService
         }
 
         return null;
+    }
+
+    private function payloadAttributes(array $payload): array
+    {
+        return array_values(array_filter(
+            (array) data_get($payload, 'content.attributes', []),
+            fn (array $attribute): bool => filled($attribute['name'] ?? null) && filled($attribute['value'] ?? null)
+        ));
     }
 
     private function storeReceipt(array $payload, string $contentHash, string $normalizedSku, string $status, array $body, ?string $errorCode = null): KaspiImportReceipt

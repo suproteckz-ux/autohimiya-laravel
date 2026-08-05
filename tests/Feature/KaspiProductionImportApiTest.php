@@ -217,6 +217,7 @@ class KaspiProductionImportApiTest extends TestCase
     {
         $product = $this->product('aut_608', ['description_is_manual' => true, 'attributes_are_manual' => true, 'description' => 'Manual']);
         ProductImage::query()->create(['product_id' => $product->id, 'path' => 'products/existing.jpg', 'source' => 'manual']);
+        ProductAttribute::query()->create(['product_id' => $product->id, 'name' => 'Existing', 'value' => 'Manual']);
 
         $this->withToken('secret-token')
             ->postJson('/api/internal/kaspi-content/import', $this->payload('aut_608'))
@@ -225,6 +226,7 @@ class KaspiProductionImportApiTest extends TestCase
 
         $this->assertSame('Manual', $product->refresh()->description);
         $this->assertSame(1, ProductImage::query()->count());
+        $this->assertSame(1, ProductAttribute::query()->count());
     }
 
     public function test_manual_empty_fields_can_be_filled_without_overwriting_existing_manual_content(): void
@@ -426,6 +428,90 @@ class KaspiProductionImportApiTest extends TestCase
 
         $this->assertSame(1, ProductImage::query()->count());
         Http::assertSentCount(1);
+    }
+
+    public function test_same_content_hash_reimports_photos_when_product_loses_photos(): void
+    {
+        $product = $this->product('reimport_photos');
+        Http::fake(['resources.cdn-kaspi.kz/*' => Http::response($this->png(), 200, ['Content-Type' => 'image/png'])]);
+        $payload = $this->payload('reimport_photos');
+
+        $this->withToken('secret-token')->postJson('/api/internal/kaspi-content/import', $payload)
+            ->assertOk()
+            ->assertJsonPath('result.images_imported', 1);
+
+        $product->images()->delete();
+        $product->update(['primary_image' => null]);
+        $this->assertSame(0, $product->refresh()->images()->count());
+
+        $payload['request_id'] = '8fb91896-7e3d-4f74-bf7f-b0d9bf471112';
+        $this->withToken('secret-token')->postJson('/api/internal/kaspi-content/import', $payload)
+            ->assertOk()
+            ->assertJsonPath('status', 'imported')
+            ->assertJsonPath('result.images_imported', 1);
+
+        $this->assertSame(1, $product->refresh()->images()->where('source', 'kaspi')->count());
+    }
+
+    public function test_same_content_hash_reimports_attributes_when_product_loses_attributes(): void
+    {
+        $product = $this->product('reimport_attributes', ['attributes_are_manual' => true]);
+        Http::fake(['resources.cdn-kaspi.kz/*' => Http::response($this->png(), 200, ['Content-Type' => 'image/png'])]);
+        $payload = $this->payload('reimport_attributes');
+
+        $this->withToken('secret-token')->postJson('/api/internal/kaspi-content/import', $payload)
+            ->assertOk()
+            ->assertJsonPath('result.attributes_updated', 1);
+
+        $product->attributes()->delete();
+        $this->assertSame(0, $product->refresh()->attributes()->count());
+
+        $payload['request_id'] = '8fb91896-7e3d-4f74-bf7f-b0d9bf471113';
+        $this->withToken('secret-token')->postJson('/api/internal/kaspi-content/import', $payload)
+            ->assertOk()
+            ->assertJsonPath('status', 'imported')
+            ->assertJsonPath('result.attributes_updated', 1);
+
+        $this->assertSame(1, $product->refresh()->attributes()->where('group_name', 'Kaspi')->count());
+    }
+
+    public function test_same_content_hash_reimports_description_when_product_loses_description(): void
+    {
+        $product = $this->product('reimport_description');
+        Http::fake(['resources.cdn-kaspi.kz/*' => Http::response($this->png(), 200, ['Content-Type' => 'image/png'])]);
+        $payload = $this->payload('reimport_description');
+
+        $this->withToken('secret-token')->postJson('/api/internal/kaspi-content/import', $payload)
+            ->assertOk()
+            ->assertJsonPath('result.description_updated', true);
+
+        $product->update(['description' => null]);
+        $this->assertNull($product->refresh()->description);
+
+        $payload['request_id'] = '8fb91896-7e3d-4f74-bf7f-b0d9bf471114';
+        $this->withToken('secret-token')->postJson('/api/internal/kaspi-content/import', $payload)
+            ->assertOk()
+            ->assertJsonPath('status', 'imported')
+            ->assertJsonPath('result.description_updated', true);
+
+        $this->assertSame('<p>Kaspi description</p>', $product->refresh()->description);
+    }
+
+    public function test_same_content_hash_returns_unchanged_when_payload_content_is_already_present(): void
+    {
+        $this->product('same_hash_complete');
+        Http::fake(['resources.cdn-kaspi.kz/*' => Http::response($this->png(), 200, ['Content-Type' => 'image/png'])]);
+        $payload = $this->payload('same_hash_complete');
+
+        $this->withToken('secret-token')->postJson('/api/internal/kaspi-content/import', $payload)
+            ->assertOk()
+            ->assertJsonPath('status', 'imported');
+
+        $payload['request_id'] = '8fb91896-7e3d-4f74-bf7f-b0d9bf471115';
+        $this->withToken('secret-token')->postJson('/api/internal/kaspi-content/import', $payload)
+            ->assertOk()
+            ->assertJsonPath('status', 'unchanged')
+            ->assertJsonMissingPath('result');
     }
 
     public function test_image_security_rejects_bad_hosts_private_ips_redirects_oversized_and_invalid_mime(): void
