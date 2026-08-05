@@ -98,9 +98,9 @@ class KaspiProductionImportApiTest extends TestCase
         $this->assertArrayNotHasKey('stock_quantity', $response->json('data.0'));
     }
 
-    public function test_protected_products_are_excluded_by_default_from_candidates(): void
+    public function test_auto_locked_products_are_excluded_by_default_from_candidates(): void
     {
-        $this->product('protected', ['description' => '', 'photos_are_manual' => true]);
+        $this->product('protected', ['description' => '', 'auto_content_locked' => true]);
 
         $response = $this->withToken('secret-token')->getJson('/api/internal/kaspi-content/candidates?limit=10');
 
@@ -108,9 +108,31 @@ class KaspiProductionImportApiTest extends TestCase
         $this->assertNotContains('protected', collect($response->json('data'))->pluck('sku')->all());
     }
 
+    public function test_empty_manual_photo_and_description_fields_remain_candidates(): void
+    {
+        $noImagesManual = $this->product('no_images_manual', ['description' => 'Has description', 'photos_are_manual' => true]);
+        $emptyDescriptionManual = $this->product('empty_description_manual', ['description' => '<p><br></p>', 'description_is_manual' => true]);
+        ProductImage::query()->create(['product_id' => $emptyDescriptionManual->id, 'path' => 'products/existing.jpg']);
+        $completeManual = $this->product('complete_manual', ['description' => 'Manual description', 'photos_are_manual' => true, 'description_is_manual' => true]);
+        ProductImage::query()->create(['product_id' => $completeManual->id, 'path' => 'products/existing-complete.jpg']);
+        $this->product('auto_locked_missing', ['description' => '', 'auto_content_locked' => true]);
+
+        $response = $this->withToken('secret-token')->getJson('/api/internal/kaspi-content/candidates?limit=10');
+
+        $response->assertOk();
+        $rows = collect($response->json('data'))->keyBy('sku');
+        $this->assertTrue($rows->has('no_images_manual'));
+        $this->assertTrue($rows->has('empty_description_manual'));
+        $this->assertFalse($rows->has('complete_manual'));
+        $this->assertFalse($rows->has('auto_locked_missing'));
+        $this->assertFalse($rows['no_images_manual']['has_images']);
+        $this->assertTrue($rows['no_images_manual']['has_description']);
+        $this->assertFalse($rows['empty_description_manual']['has_description']);
+    }
+
     public function test_candidate_debug_diagnostics_explain_filter_rejections_and_requested_sku(): void
     {
-        $this->product('manual_debug', ['description' => '', 'photos_are_manual' => true]);
+        $this->product('manual_debug', ['description' => '', 'auto_content_locked' => true]);
         $complete = $this->product('aut_608', ['description' => 'Has description']);
         ProductImage::query()->create(['product_id' => $complete->id, 'path' => 'products/existing.jpg']);
         ProductAttribute::query()->create(['product_id' => $complete->id, 'name' => 'Volume', 'value' => '1 L']);
@@ -193,7 +215,8 @@ class KaspiProductionImportApiTest extends TestCase
 
     public function test_manual_content_protection_returns_409_without_partial_update(): void
     {
-        $product = $this->product('aut_608', ['description_is_manual' => true, 'description' => 'Manual']);
+        $product = $this->product('aut_608', ['description_is_manual' => true, 'attributes_are_manual' => true, 'description' => 'Manual']);
+        ProductImage::query()->create(['product_id' => $product->id, 'path' => 'products/existing.jpg', 'source' => 'manual']);
 
         $this->withToken('secret-token')
             ->postJson('/api/internal/kaspi-content/import', $this->payload('aut_608'))
@@ -201,7 +224,51 @@ class KaspiProductionImportApiTest extends TestCase
             ->assertJsonPath('error', 'manual_content_protected');
 
         $this->assertSame('Manual', $product->refresh()->description);
-        $this->assertSame(0, ProductImage::query()->count());
+        $this->assertSame(1, ProductImage::query()->count());
+    }
+
+    public function test_manual_empty_fields_can_be_filled_without_overwriting_existing_manual_content(): void
+    {
+        Http::fake(['resources.cdn-kaspi.kz/*' => Http::response($this->png(), 200, ['Content-Type' => 'image/png'])]);
+
+        $noImages = $this->product('no_images', ['description' => 'Manual description', 'photos_are_manual' => true, 'description_is_manual' => true]);
+        $this->withToken('secret-token')
+            ->postJson('/api/internal/kaspi-content/import', $this->payload('no_images', ['request_id' => '8fb91896-7e3d-4f74-bf7f-b0d9bf471001']))
+            ->assertOk()
+            ->assertJsonPath('status', 'imported');
+        $this->assertSame('Manual description', $noImages->refresh()->description);
+        $this->assertSame(1, $noImages->images()->where('source', 'kaspi')->count());
+
+        $emptyDescription = $this->product('empty_manual_description', ['description' => '<p><br></p>', 'description_is_manual' => true, 'photos_are_manual' => true]);
+        ProductImage::query()->create(['product_id' => $emptyDescription->id, 'path' => 'products/existing.jpg', 'source' => 'manual']);
+        $this->withToken('secret-token')
+            ->postJson('/api/internal/kaspi-content/import', $this->payload('empty_manual_description', ['request_id' => '8fb91896-7e3d-4f74-bf7f-b0d9bf471002']))
+            ->assertOk()
+            ->assertJsonPath('status', 'imported');
+        $emptyDescription->refresh();
+        $this->assertSame('<p>Kaspi description</p>', $emptyDescription->description);
+        $this->assertSame(1, $emptyDescription->images()->count());
+        $this->assertSame('products/existing.jpg', $emptyDescription->images()->first()->path);
+    }
+
+    public function test_empty_html_description_detection_for_candidates(): void
+    {
+        foreach (['<p></p>', '<p><br></p>', '<div>&nbsp;</div>'] as $index => $description) {
+            $product = $this->product('empty_html_'.$index, ['description' => $description, 'description_is_manual' => true]);
+            ProductImage::query()->create(['product_id' => $product->id, 'path' => 'products/existing-'.$index.'.jpg']);
+        }
+
+        $meaningful = $this->product('meaningful_html', ['description' => '<p>Описание товара</p>', 'description_is_manual' => true]);
+        ProductImage::query()->create(['product_id' => $meaningful->id, 'path' => 'products/meaningful.jpg']);
+
+        $response = $this->withToken('secret-token')->getJson('/api/internal/kaspi-content/candidates?limit=10');
+
+        $response->assertOk();
+        $skus = collect($response->json('data'))->pluck('sku')->all();
+        $this->assertContains('empty_html_0', $skus);
+        $this->assertContains('empty_html_1', $skus);
+        $this->assertContains('empty_html_2', $skus);
+        $this->assertNotContains('meaningful_html', $skus);
     }
 
     public function test_same_request_id_is_idempotent_and_identical_content_is_unchanged(): void

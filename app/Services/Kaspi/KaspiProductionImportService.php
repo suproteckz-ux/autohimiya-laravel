@@ -7,6 +7,7 @@ use App\Models\KaspiImportReceipt;
 use App\Models\Product;
 use App\Support\ContentScore;
 use App\Support\KaspiBridgeSku;
+use App\Support\MeaningfulContent;
 use App\Support\Utf8Sanitizer;
 use Illuminate\Support\Facades\DB;
 
@@ -85,7 +86,7 @@ class KaspiProductionImportService
             $before = $this->protectedProductSnapshot($product);
             $task = $this->taskFromPayload($product, $payload);
             $applyPhoto = ! ContentScore::hasPhoto($product);
-            $applyDescription = blank($product->description);
+            $applyDescription = MeaningfulContent::descriptionIsEmpty($product->description);
             $applyAttributes = ! $product->attributes()->exists();
             $result = $this->publisher->publish($task, [
                 'dry_run' => false,
@@ -173,7 +174,7 @@ class KaspiProductionImportService
         ], [
             'kaspi_product_url' => $payload['kaspi_url'],
             'missing_photo' => ! ContentScore::hasPhoto($product),
-            'missing_description' => blank($product->description),
+            'missing_description' => MeaningfulContent::descriptionIsEmpty($product->description),
             'missing_attributes' => ! $product->attributes()->exists(),
             'status' => 'draft',
             'source' => 'production_bridge',
@@ -212,15 +213,29 @@ class KaspiProductionImportService
         }
 
         $content = (array) $payload['content'];
-        if ((bool) $product->photos_are_manual && (array) ($content['images'] ?? []) !== []) {
+        $incomingImages = (array) ($content['images'] ?? []);
+        $incomingDescription = $content['description'] ?? null;
+        $incomingAttributes = (array) ($content['attributes'] ?? []);
+        $hasPhoto = ContentScore::hasPhoto($product);
+        $hasDescription = MeaningfulContent::hasDescription($product->description);
+        $hasAttributes = $product->attributes()->exists();
+        $hasImportableMissingField = ($incomingImages !== [] && ! $hasPhoto)
+            || (MeaningfulContent::hasDescription($incomingDescription) && ! $hasDescription)
+            || ($incomingAttributes !== [] && ! $hasAttributes && ! (bool) $product->attributes_are_manual);
+
+        if ($hasImportableMissingField) {
+            return null;
+        }
+
+        if ($hasPhoto && (bool) $product->photos_are_manual && $incomingImages !== []) {
             return 'photos_are_manual';
         }
 
-        if ((bool) $product->description_is_manual && filled($content['description'] ?? null)) {
+        if ($hasDescription && (bool) $product->description_is_manual && MeaningfulContent::hasDescription($incomingDescription)) {
             return 'description_is_manual';
         }
 
-        if ((bool) $product->attributes_are_manual && (array) ($content['attributes'] ?? []) !== []) {
+        if ($hasAttributes && (bool) $product->attributes_are_manual && $incomingAttributes !== []) {
             return 'attributes_are_manual';
         }
 

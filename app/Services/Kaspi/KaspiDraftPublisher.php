@@ -9,6 +9,7 @@ use App\Models\ProductAttribute;
 use App\Models\ProductImage;
 use App\Services\Catalog\CatalogDescriptionFallbackService;
 use App\Support\ContentScore;
+use App\Support\MeaningfulContent;
 use App\Support\Utf8Sanitizer;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Http;
@@ -96,10 +97,10 @@ class KaspiDraftPublisher
         $hasAttributes = $product->attributes()->count() > 0;
         $hasPhoto = ContentScore::hasPhoto($product);
         $hasKaspiPhoto = $product->images()->where('source', 'kaspi')->exists();
-        $hasDescription = filled($product->description);
+        $hasDescription = MeaningfulContent::hasDescription($product->description);
         $locked = (bool) $product->auto_content_locked;
-        $photosProtected = $locked || (bool) $product->photos_are_manual;
-        $descriptionProtected = $locked || (bool) $product->description_is_manual;
+        $photosProtected = $locked || ($hasPhoto && (bool) $product->photos_are_manual);
+        $descriptionProtected = $locked || ($hasDescription && (bool) $product->description_is_manual);
         $attributesProtected = $locked || (bool) $product->attributes_are_manual;
 
         return [
@@ -113,13 +114,13 @@ class KaspiDraftPublisher
                 'count' => count($images),
             ],
             'description' => [
-                'will_apply' => $applyDescription && filled($description) && ($forceDescription || (! $hasDescription && ! $descriptionProtected)),
-                'reason' => blank($description)
+                'will_apply' => $applyDescription && MeaningfulContent::hasDescription($description) && ($forceDescription || (! $hasDescription && ! $descriptionProtected)),
+                'reason' => MeaningfulContent::descriptionIsEmpty($description)
                     ? 'В Kaspi draft нет чистого описания и fallback не применим.'
                     : ($locked ? 'Auto content locked.'
                         : ($product->description_is_manual ? 'Description is marked as manual.'
                             : ($forceDescription ? 'Описание Kaspi заменит текущее описание.' : ($hasDescription ? 'На сайте уже есть описание.' : 'Будет добавлено описание.')))),
-                'count' => filled($description) ? 1 : 0,
+                'count' => MeaningfulContent::hasDescription($description) ? 1 : 0,
             ],
             'attributes' => [
                 'will_apply' => $applyAttributes && $attributes !== [] && ($forceAttributes || (! $hasAttributes && ! $attributesProtected)),

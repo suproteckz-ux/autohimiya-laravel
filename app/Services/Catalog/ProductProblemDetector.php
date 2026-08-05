@@ -3,6 +3,7 @@
 namespace App\Services\Catalog;
 
 use App\Models\Product;
+use App\Support\MeaningfulContent;
 
 class ProductProblemDetector
 {
@@ -49,7 +50,7 @@ class ProductProblemDetector
 
     public function hasDescription(Product $product): bool
     {
-        return filled(strip_tags((string) $product->description));
+        return MeaningfulContent::hasDescription($product->description);
     }
 
     public function hasSeo(Product $product): bool

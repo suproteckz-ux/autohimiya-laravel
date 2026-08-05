@@ -3,6 +3,7 @@
 namespace App\Services\Kaspi;
 
 use App\Models\Product;
+use App\Support\MeaningfulContent;
 use Illuminate\Database\Eloquent\Builder;
 
 class KaspiProductionCandidateService
@@ -19,30 +20,22 @@ class KaspiProductionCandidateService
             ->withCount(['images', 'attributes'])
             ->whereNotNull('sku')
             ->where('sku', '<>', '')
-            ->where(function (Builder $query): void {
-                $query
-                    ->whereDoesntHave('images')
-                    ->orWhere(fn (Builder $inner) => $inner->whereNull('description')->orWhere('description', ''));
-            })
+            ->where('auto_content_locked', false)
             ->orderBy('id');
 
         if ($skus !== []) {
             $query->whereIn('sku', $skus);
         }
 
-        if (! $includeProtected) {
-            $query->where('auto_content_locked', false)
-                ->where('photos_are_manual', false)
-                ->where('description_is_manual', false);
-        }
-
         if ($cursor > 0) {
             $query->where('id', '>', $cursor);
         }
 
-        $products = $query->limit($limit + 1)->get();
-        $hasMore = $products->count() > $limit;
-        $products = $products->take($limit)->values();
+        $eligible = $query->get()
+            ->filter(fn (Product $product): bool => $this->isCandidate($product))
+            ->values();
+        $hasMore = $eligible->count() > $limit;
+        $products = $eligible->take($limit)->values();
         $next = $hasMore && $products->isNotEmpty() ? $products->last()->id : null;
 
         $result = [
@@ -50,10 +43,10 @@ class KaspiProductionCandidateService
                 'sku' => (string) $product->sku,
                 'name' => (string) $product->display_name,
                 'kaspi_product_url' => $product->kaspi_product_url,
-                'has_images' => (int) $product->images_count > 0,
-                'has_description' => filled($product->description),
+                'has_images' => $this->hasImages($product),
+                'has_description' => $this->hasDescription($product),
                 'has_attributes' => (int) $product->attributes_count > 0,
-                'manual_content_protected' => (bool) ($product->auto_content_locked || $product->photos_are_manual || $product->description_is_manual),
+                'manual_content_protected' => $this->manualContentProtected($product),
             ])->all(),
             'next_cursor' => $next,
         ];
@@ -94,41 +87,24 @@ class KaspiProductionCandidateService
             $remaining->where('id', '>', $cursor);
         }
 
-        if (! $includeProtected) {
-            $rejected['manual_content_protected'] = (clone $remaining)
-                ->where(fn (Builder $query) => $query
-                    ->where('auto_content_locked', true)
-                    ->orWhere('photos_are_manual', true)
-                    ->orWhere('description_is_manual', true))
-                ->count();
+        $products = $remaining->get();
+        $autoLocked = $products->filter(fn (Product $product): bool => (bool) $product->auto_content_locked)->count();
+        $remainingProducts = $products->reject(fn (Product $product): bool => (bool) $product->auto_content_locked)->values();
+        $completeContent = $remainingProducts->filter(fn (Product $product): bool => $this->hasImages($product) && $this->hasDescription($product))->count();
 
-            $remaining
-                ->where('auto_content_locked', false)
-                ->where('photos_are_manual', false)
-                ->where('description_is_manual', false);
-        }
-
-        $completeContent = (clone $remaining)
-            ->whereHas('images')
-            ->whereNotNull('description')
-            ->where('description', '<>', '')
-            ->count();
-
+        $rejected['manual_content_protected'] = $autoLocked;
         $rejected['has_images'] = $completeContent;
         $rejected['has_description'] = $completeContent;
 
         return [
             'total_products' => $total,
-            'returned_candidate_count' => (clone $remaining)
-                ->where(fn (Builder $query) => $query
-                    ->whereDoesntHave('images')
-                    ->orWhere(fn (Builder $inner) => $inner->whereNull('description')->orWhere('description', '')))
-                ->count(),
+            'returned_candidate_count' => $remainingProducts->filter(fn (Product $product): bool => $this->isCandidate($product))->count(),
             'rejected' => $rejected,
             'notes' => [
                 'has_images' => 'Products are excluded for complete content only when has_images and has_description are both true.',
                 'has_attributes' => 'Not applied as a candidate filter.',
                 'missing_kaspi_url' => 'Not applied as a candidate filter; local resolver may resolve a missing URL.',
+                'manual_content_protected' => 'Empty manual photo/description fields do not block candidacy; auto_content_locked still excludes the product.',
             ],
             'requested_skus' => array_map(fn (string $sku): array => $this->explainSku($sku, $includeProtected, $cursor), $skus),
         ];
@@ -155,9 +131,9 @@ class KaspiProductionCandidateService
             ];
         }
 
-        $manualProtected = (bool) ($product->auto_content_locked || $product->photos_are_manual || $product->description_is_manual);
-        $hasImages = (int) $product->images_count > 0;
-        $hasDescription = filled($product->description);
+        $manualProtected = $this->manualContentProtected($product);
+        $hasImages = $this->hasImages($product);
+        $hasDescription = $this->hasDescription($product);
         $hasAttributes = (int) $product->attributes_count > 0;
         $reasons = [];
 
@@ -165,7 +141,7 @@ class KaspiProductionCandidateService
             $reasons[] = 'cursor';
         }
 
-        if (! $includeProtected && $manualProtected) {
+        if ((bool) $product->auto_content_locked) {
             $reasons[] = 'manual_content_protected';
         }
 
@@ -183,5 +159,28 @@ class KaspiProductionCandidateService
             'kaspi_url' => filled($product->kaspi_product_url) ? 'present' : 'missing',
             'excluded_because' => $reasons === [] ? 'not_excluded_by_candidate_filters' : implode(',', $reasons),
         ];
+    }
+
+    private function isCandidate(Product $product): bool
+    {
+        return ! (bool) $product->auto_content_locked
+            && (! $this->hasImages($product) || ! $this->hasDescription($product));
+    }
+
+    private function hasImages(Product $product): bool
+    {
+        return (int) ($product->images_count ?? 0) > 0;
+    }
+
+    private function hasDescription(Product $product): bool
+    {
+        return MeaningfulContent::hasDescription($product->description);
+    }
+
+    private function manualContentProtected(Product $product): bool
+    {
+        return (bool) $product->auto_content_locked
+            || ($this->hasImages($product) && (bool) $product->photos_are_manual)
+            || ($this->hasDescription($product) && (bool) $product->description_is_manual);
     }
 }
