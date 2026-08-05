@@ -251,6 +251,146 @@ class KaspiProductionImportApiTest extends TestCase
         $this->assertSame('products/existing.jpg', $emptyDescription->images()->first()->path);
     }
 
+    public function test_empty_manual_attributes_can_be_filled_from_kaspi(): void
+    {
+        $product = $this->product('manual_empty_attributes', ['attributes_are_manual' => true]);
+        Http::fake(['resources.cdn-kaspi.kz/*' => Http::response($this->png(), 200, ['Content-Type' => 'image/png'])]);
+
+        $this->withToken('secret-token')
+            ->postJson('/api/internal/kaspi-content/import', $this->payload('manual_empty_attributes', [
+                'request_id' => '8fb91896-7e3d-4f74-bf7f-b0d9bf471003',
+            ]))
+            ->assertOk()
+            ->assertJsonPath('result.attributes_updated', 1);
+
+        $attribute = $product->refresh()->attributes()->first();
+        $this->assertNotNull($attribute);
+        $this->assertSame('Kaspi', $attribute->group_name);
+        $this->assertSame('Объем', $attribute->name);
+        $this->assertSame('1 л', $attribute->value);
+    }
+
+    public function test_existing_manual_attributes_are_preserved_from_kaspi_mass_import(): void
+    {
+        $product = $this->product('manual_existing_attributes', ['attributes_are_manual' => true]);
+        ProductAttribute::query()->create([
+            'product_id' => $product->id,
+            'group_name' => 'Manual',
+            'name' => 'Existing',
+            'value' => 'Keep me',
+            'sort_order' => 0,
+        ]);
+        Http::fake(['resources.cdn-kaspi.kz/*' => Http::response($this->png(), 200, ['Content-Type' => 'image/png'])]);
+
+        $this->withToken('secret-token')
+            ->postJson('/api/internal/kaspi-content/import', $this->payload('manual_existing_attributes', [
+                'request_id' => '8fb91896-7e3d-4f74-bf7f-b0d9bf471004',
+            ]))
+            ->assertOk()
+            ->assertJsonPath('result.attributes_updated', 0);
+
+        $attributes = $product->refresh()->attributes()->get();
+        $this->assertCount(1, $attributes);
+        $this->assertSame('Existing', $attributes->first()->name);
+        $this->assertSame('Keep me', $attributes->first()->value);
+    }
+
+    public function test_non_manual_empty_attributes_still_import_from_kaspi(): void
+    {
+        $product = $this->product('regular_empty_attributes', ['attributes_are_manual' => false]);
+        Http::fake(['resources.cdn-kaspi.kz/*' => Http::response($this->png(), 200, ['Content-Type' => 'image/png'])]);
+
+        $this->withToken('secret-token')
+            ->postJson('/api/internal/kaspi-content/import', $this->payload('regular_empty_attributes', [
+                'request_id' => '8fb91896-7e3d-4f74-bf7f-b0d9bf471005',
+            ]))
+            ->assertOk()
+            ->assertJsonPath('result.attributes_updated', 1);
+
+        $this->assertSame(1, $product->refresh()->attributes()->where('group_name', 'Kaspi')->count());
+    }
+
+    public function test_auto_locked_product_with_empty_attributes_remains_blocked(): void
+    {
+        $product = $this->product('locked_empty_attributes', ['auto_content_locked' => true]);
+        Http::fake(['resources.cdn-kaspi.kz/*' => Http::response($this->png(), 200, ['Content-Type' => 'image/png'])]);
+
+        $this->withToken('secret-token')
+            ->postJson('/api/internal/kaspi-content/import', $this->payload('locked_empty_attributes', [
+                'request_id' => '8fb91896-7e3d-4f74-bf7f-b0d9bf471006',
+            ]))
+            ->assertStatus(409)
+            ->assertJsonPath('error', 'manual_content_protected')
+            ->assertJsonPath('reason', 'auto_content_locked');
+
+        $this->assertSame(0, $product->refresh()->attributes()->count());
+    }
+
+    public function test_empty_kaspi_attribute_payload_creates_no_attribute_rows(): void
+    {
+        $product = $this->product('empty_attribute_payload');
+        $payload = $this->payload('empty_attribute_payload', [
+            'request_id' => '8fb91896-7e3d-4f74-bf7f-b0d9bf471007',
+        ]);
+        $payload['content']['attributes'] = [];
+        $payload['content']['images'] = [];
+        $payload['content']['description'] = null;
+
+        $this->withToken('secret-token')
+            ->postJson('/api/internal/kaspi-content/import', $payload)
+            ->assertOk()
+            ->assertJsonPath('result.attributes_updated', 0);
+
+        $this->assertSame(0, $product->refresh()->attributes()->count());
+    }
+
+    public function test_aut_163_style_attribute_import_regression(): void
+    {
+        $product = $this->product('aut_163');
+        $payload = $this->payload('aut_163', [
+            'request_id' => '8fb91896-7e3d-4f74-bf7f-b0d9bf471008',
+        ]);
+        $payload['content']['attributes'] = [
+            ['name' => 'Применение', 'value' => 'выхлопная система, корпус, моторный отсек, скрытые полости'],
+            ['name' => 'Способ нанесения', 'value' => 'аэрозоль'],
+            ['name' => 'Объем', 'value' => '0.4 л'],
+        ];
+        $payload['content']['images'] = [];
+        $payload['content']['description'] = null;
+
+        $this->withToken('secret-token')
+            ->postJson('/api/internal/kaspi-content/import', $payload)
+            ->assertOk()
+            ->assertJsonPath('result.attributes_updated', 3);
+
+        $this->assertSame(
+            ['Применение', 'Способ нанесения', 'Объем'],
+            $product->refresh()->attributes()->orderBy('sort_order')->pluck('name')->all()
+        );
+    }
+
+    public function test_storefront_characteristics_block_is_visible_after_attributes_are_persisted(): void
+    {
+        $category = Category::query()->create(['name' => 'Cat', 'slug' => 'cat']);
+        $product = $this->product('visible_attributes', [
+            'category_id' => $category->id,
+            'description' => null,
+        ]);
+        ProductAttribute::query()->create([
+            'product_id' => $product->id,
+            'group_name' => 'Kaspi',
+            'name' => 'Объем упаковки, л',
+            'value' => '0.02 л',
+            'sort_order' => 0,
+        ]);
+
+        $this->get(route('products.show', $product->slug))
+            ->assertOk()
+            ->assertSee('class="attributes"', false)
+            ->assertSeeText('Объем упаковки, л')
+            ->assertSeeText('0.02 л');
+    }
+
     public function test_empty_html_description_detection_for_candidates(): void
     {
         foreach (['<p></p>', '<p><br></p>', '<div>&nbsp;</div>'] as $index => $description) {

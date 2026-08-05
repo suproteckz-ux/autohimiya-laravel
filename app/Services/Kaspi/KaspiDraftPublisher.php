@@ -101,7 +101,7 @@ class KaspiDraftPublisher
         $locked = (bool) $product->auto_content_locked;
         $photosProtected = $locked || ($hasPhoto && (bool) $product->photos_are_manual);
         $descriptionProtected = $locked || ($hasDescription && (bool) $product->description_is_manual);
-        $attributesProtected = $locked || (bool) $product->attributes_are_manual;
+        $attributesProtected = $locked || ($hasAttributes && (bool) $product->attributes_are_manual);
 
         return [
             'photo' => [
