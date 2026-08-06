@@ -211,12 +211,19 @@ class KaspiEnrichmentParser
         $lower = mb_strtolower($url);
         $path = mb_strtolower(parse_url($url, PHP_URL_PATH) ?: '');
         $host = mb_strtolower(parse_url($url, PHP_URL_HOST) ?: '');
+        $query = [];
+        parse_str((string) (parse_url($url, PHP_URL_QUERY) ?: ''), $query);
+        $format = mb_strtolower((string) ($query['format'] ?? ''));
+        $isKaspiProductCdn = str_contains($host, 'resources.cdn-kaspi.kz')
+            && (str_starts_with($path, '/img/m/p/') || str_starts_with($path, '/shop/medias/'));
 
         if (! str_starts_with($lower, 'http')) {
             return 'not_http';
         }
 
-        if (! preg_match('/\.(jpe?g|png|webp)$/i', $path)) {
+        $supportedImagePath = preg_match('/\.(jpe?g|png|webp)$/i', $path)
+            || ($isKaspiProductCdn && str_ends_with($path, '.bin') && str_starts_with($format, 'gallery-'));
+        if (! $supportedImagePath) {
             return 'unsupported_extension';
         }
 
@@ -233,9 +240,6 @@ class KaspiEnrichmentParser
         if (preg_match('/(?:^|[-_\/])(\d{1,3})x(\d{1,3})(?:[._\/-]|$)/i', $lower, $size) && ((int) $size[1] < 200 || (int) $size[2] < 200)) {
             return 'too_small';
         }
-
-        $isKaspiProductCdn = str_contains($host, 'resources.cdn-kaspi.kz')
-            && (str_starts_with($path, '/img/m/p/') || str_starts_with($path, '/shop/medias/'));
 
         return $isKaspiProductCdn ? null : 'not_product_image_path';
     }
