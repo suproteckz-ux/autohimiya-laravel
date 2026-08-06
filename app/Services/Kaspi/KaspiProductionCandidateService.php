@@ -4,6 +4,7 @@ namespace App\Services\Kaspi;
 
 use App\Models\Product;
 use App\Support\MeaningfulContent;
+use App\Support\StorefrontCanonicalUrl;
 use Illuminate\Database\Eloquent\Builder;
 
 class KaspiProductionCandidateService
@@ -41,7 +42,9 @@ class KaspiProductionCandidateService
         $result = [
             'data' => $products->map(fn (Product $product): array => [
                 'sku' => (string) $product->sku,
+                'slug' => (string) $product->slug,
                 'name' => (string) $product->display_name,
+                'storefront_url' => $this->storefrontUrl($product),
                 'kaspi_product_url' => $product->kaspi_product_url,
                 'has_images' => $this->hasImages($product),
                 'has_description' => $this->hasDescription($product),
@@ -182,5 +185,15 @@ class KaspiProductionCandidateService
         return (bool) $product->auto_content_locked
             || ($this->hasImages($product) && (bool) $product->photos_are_manual)
             || ($this->hasDescription($product) && (bool) $product->description_is_manual);
+    }
+
+    private function storefrontUrl(Product $product): ?string
+    {
+        $slug = trim((string) $product->slug);
+        if ($slug === '') {
+            return null;
+        }
+
+        return StorefrontCanonicalUrl::path('/product/'.$slug);
     }
 }

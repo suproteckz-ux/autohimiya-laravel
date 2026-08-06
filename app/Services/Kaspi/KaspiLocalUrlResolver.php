@@ -44,6 +44,10 @@ class KaspiLocalUrlResolver
             }
 
             if (($widget['reason'] ?? null) === 'not_found') {
+                if ($this->storefrontNotFound($widget)) {
+                    throw new \RuntimeException($this->exceptionMessage('storefront_product_url_invalid', (array) ($widget['process'] ?? []), null, $debug));
+                }
+
                 $notFound[] = $widget;
                 continue;
             }
@@ -51,20 +55,10 @@ class KaspiLocalUrlResolver
             throw new \RuntimeException($this->exceptionMessage('url_resolver_'.$widget['reason'], (array) ($widget['process'] ?? []), null, $debug));
         }
 
-        $search = $this->runResolver('kaspi-search-url-resolver.mjs', [
-            'sku' => $sku,
-            'name' => (string) $name,
-            'headless' => true,
-            'artifact-dir' => $this->artifactDirectory($sku, 'search'),
-            'debug' => $debug,
-        ], 'search', $debug);
+        $lastWidget = $notFound === [] ? [] : (array) $notFound[array_key_last($notFound)];
+        $lastWidgetProcess = (array) ($lastWidget['process'] ?? []);
 
-        if (($search['ok'] ?? false) === true) {
-            return $this->resolved($search);
-        }
-
-        $reason = (string) ($search['reason'] ?? 'not_found');
-        throw new \RuntimeException($this->exceptionMessage('url_resolver_'.$reason, (array) ($search['process'] ?? []), null, $debug, ['widget_not_found_attempts' => count($notFound)]));
+        throw new \RuntimeException($this->exceptionMessage('kaspi_product_missing', $lastWidgetProcess, null, $debug, ['widget_not_found_attempts' => count($notFound)]));
     }
 
     /**
@@ -96,7 +90,7 @@ class KaspiLocalUrlResolver
             throw new \RuntimeException($this->exceptionMessage('url_resolver_invalid_json', $process, 'Decoded JSON is not an object.', $debug));
         }
 
-        $payload['process'] = $this->safeProcessDiagnostics($process, $stdout, $stderr);
+        $payload['process'] = $this->safeProcessDiagnostics($process, $stdout, $stderr, $debug);
         $payload['method'] = $payload['method'] ?? $method;
 
         $reason = (string) ($payload['reason'] ?? '');
@@ -110,7 +104,10 @@ class KaspiLocalUrlResolver
 
         if (($payload['ok'] ?? false) === true) {
             $payload['url'] = $this->validatedProductUrl((string) ($payload['url'] ?? $payload['resolved_kaspi_url'] ?? ''));
-            $this->assertSkuMatchesUrl((string) ($payload['sku'] ?? ''), $payload['url']);
+
+            if (($payload['method'] ?? $method) !== 'widget') {
+                $this->assertSkuMatchesUrl((string) ($payload['sku'] ?? ''), $payload['url']);
+            }
 
             return $payload;
         }
@@ -139,6 +136,16 @@ class KaspiLocalUrlResolver
 
         $base = rtrim((string) config('app.url'), '/');
         if ($base !== '') {
+            if (filled($options['slug'] ?? null)) {
+                $slug = trim((string) $options['slug'], '/');
+
+                return collect($this->baseUrlVariants($base))
+                    ->map(fn (string $baseUrl): string => $baseUrl.'/product/'.$slug)
+                    ->unique()
+                    ->values()
+                    ->all();
+            }
+
             $slugs = array_values(array_unique(array_filter([
                 ProductSlugger::fromName($name, $sku),
                 ProductSlugger::normalizeSlug($sku),
@@ -179,6 +186,14 @@ class KaspiLocalUrlResolver
             || str_ends_with($host, '.localhost')
             || filter_var($host, FILTER_VALIDATE_IP) !== false;
     }
+
+    private function storefrontNotFound(array $payload): bool
+    {
+        $status = (int) ($payload['http_status'] ?? $payload['navigation_http_status'] ?? 0);
+
+        return $status === 404;
+    }
+
     private function resolved(array $payload): array
     {
         return [
@@ -245,7 +260,7 @@ class KaspiLocalUrlResolver
             return $code;
         }
 
-        $diagnostics = $this->safeProcessDiagnostics($process, (string) ($process['stdout'] ?? ''), (string) ($process['stderr'] ?? ''));
+        $diagnostics = $this->safeProcessDiagnostics($process, (string) ($process['stdout'] ?? ''), (string) ($process['stderr'] ?? ''), $debug);
         if ($jsonError !== null) {
             $diagnostics['json_error'] = $jsonError;
         }
@@ -259,9 +274,9 @@ class KaspiLocalUrlResolver
      * @param array{command?: array<int, string>, script?: string, cwd?: string, exit_code?: int|null, stdout?: string, stderr?: string} $process
      * @return array<string, mixed>
      */
-    private function safeProcessDiagnostics(array $process, string $stdout, string $stderr): array
+    private function safeProcessDiagnostics(array $process, string $stdout, string $stderr, bool $includeFullOutput = false): array
     {
-        return [
+        $diagnostics = [
             'command' => $process['command'] ?? [],
             'script' => $process['script'] ?? null,
             'cwd' => $process['cwd'] ?? null,
@@ -272,13 +287,25 @@ class KaspiLocalUrlResolver
             'stdout_preview' => $this->preview($stdout, 300),
             'stderr_preview' => $this->preview($stderr, 500),
         ];
+
+        if ($includeFullOutput) {
+            $diagnostics['stdout'] = $this->sanitize($stdout);
+            $diagnostics['stderr'] = $this->sanitize($stderr);
+        }
+
+        return $diagnostics;
     }
 
     private function preview(string $value, int $limit): string
     {
+        return mb_substr($this->sanitize($value), 0, $limit);
+    }
+
+    private function sanitize(string $value): string
+    {
         $value = preg_replace('/Bearer\s+[A-Za-z0-9._~+\/=-]+/i', 'Bearer [redacted]', $value) ?: $value;
         $value = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F]+/', '', $value) ?: $value;
 
-        return mb_substr($value, 0, $limit);
+        return $value;
     }
 }

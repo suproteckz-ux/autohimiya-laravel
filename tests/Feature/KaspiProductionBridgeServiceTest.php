@@ -38,7 +38,8 @@ class KaspiProductionBridgeServiceTest extends TestCase
         $result = app(KaspiProductionBridgeService::class)->push(['sku' => ['aut_608'], 'dry_run' => true]);
 
         $this->assertTrue($result['successful'], json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
-        $this->assertSame(1, $result['metrics']['collected']);
+        $this->assertSame(1, $result['metrics']['resolved_from_existing']);
+        $this->assertSame(0, $result['metrics']['imported']);
         $this->assertSame(1, KaspiProductionPush::query()->count());
         $this->assertSame(1, $collector->calls);
         Http::assertNothingSent();
@@ -154,7 +155,7 @@ class KaspiProductionBridgeServiceTest extends TestCase
         $result = app(KaspiProductionBridgeService::class)->push(['sku' => ['bad_sku', 'good_sku']]);
 
         $this->assertFalse($result['successful']);
-        $this->assertSame(1, $result['metrics']['failed']);
+        $this->assertSame(1, $result['metrics']['failed_system']);
         $this->assertSame(1, KaspiProductionPush::query()->count());
         $this->assertSame('good_sku', KaspiProductionPush::query()->firstOrFail()->sku);
     }
@@ -259,13 +260,109 @@ class KaspiProductionBridgeServiceTest extends TestCase
         app()->instance(KaspiLocalUrlResolver::class, $resolver);
         app()->instance(KaspiLocalPageCollector::class, $this->fakeCollector());
 
-        app(KaspiProductionBridgeService::class)->push(['limit' => 2, 'dry_run' => true]);
+        $result = app(KaspiProductionBridgeService::class)->push(['limit' => 2, 'dry_run' => true]);
 
         $this->assertSame(['missing_url'], $resolver->skus);
+        $this->assertSame(1, $result['metrics']['resolved_from_widget']);
+        $this->assertSame(1, $result['metrics']['resolved_from_existing']);
         $this->assertSame(
             ['https://kaspi.kz/shop/p/resolved-missing-url/', 'https://kaspi.kz/shop/p/existing-url/'],
             KaspiProductionPush::query()->orderBy('id')->pluck('kaspi_url')->all()
         );
+    }
+
+    public function test_bridge_uses_candidate_storefront_url_for_sku_that_differs_from_slug(): void
+    {
+        app()->instance(KaspiProductionCandidateClient::class, $this->fakeCandidateClient([[
+            'sku' => 'aut_612',
+            'slug' => 'real-production-slug-for-aut-612',
+            'name' => 'Remote product',
+            'kaspi_product_url' => null,
+            'storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/real-production-slug-for-aut-612',
+            'has_images' => false,
+            'has_description' => false,
+        ]]));
+        $runner = $this->fakeNodeRunner([
+            $this->processJson(['ok' => true, 'sku' => 'aut_612', 'url' => 'https://kaspi.kz/shop/p/resolved-aut-612/', 'method' => 'widget', 'reason' => null, 'http_status' => 200, 'page_url' => 'https://www.xn--80aesatk1az7g.kz/product/real-production-slug-for-aut-612']),
+        ]);
+        app()->instance(KaspiLocalNodeProcessRunner::class, $runner);
+        app()->instance(KaspiLocalPageCollector::class, $this->fakeCollector());
+
+        $result = app(KaspiProductionBridgeService::class)->push(['sku' => ['aut_612'], 'dry_run' => true]);
+
+        $this->assertTrue($result['successful'], json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        $this->assertSame(1, $result['metrics']['resolved_from_widget']);
+        $this->assertCount(1, $runner->runs);
+        $this->assertSame('https://www.xn--80aesatk1az7g.kz/product/real-production-slug-for-aut-612', $runner->runs[0]['arguments']['url']);
+        $this->assertStringNotContainsString('/product/aut-612', $runner->runs[0]['arguments']['url']);
+    }
+
+    public function test_bridge_classifies_widget_not_found_as_kaspi_product_missing_without_collecting_or_sending(): void
+    {
+        app()->instance(KaspiProductionCandidateClient::class, $this->fakeCandidateClient([[
+            'sku' => 'FDB060',
+            'name' => 'Remote product',
+            'kaspi_product_url' => null,
+            'storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060',
+            'has_images' => false,
+            'has_description' => false,
+        ]]));
+        $runner = $this->fakeNodeRunner([
+            $this->processJson(['ok' => false, 'sku' => 'FDB060', 'url' => null, 'method' => 'widget', 'reason' => 'not_found', 'http_status' => 200]),
+        ]);
+        $collector = $this->fakeCollector();
+        app()->instance(KaspiLocalNodeProcessRunner::class, $runner);
+        app()->instance(KaspiLocalPageCollector::class, $collector);
+        Http::fake();
+
+        $result = app(KaspiProductionBridgeService::class)->push(['sku' => ['FDB060'], 'dry_run' => true]);
+
+        $this->assertTrue($result['successful'], json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        $this->assertSame(1, $result['metrics']['kaspi_product_missing']);
+        $this->assertSame(0, $result['metrics']['failed_system']);
+        $this->assertSame('kaspi_product_missing', $result['rows'][0]['status']);
+        $this->assertSame(0, KaspiProductionPush::query()->count());
+        $this->assertSame(0, $collector->calls);
+        $this->assertCount(1, $runner->runs);
+        $this->assertStringEndsWith('scripts/kaspi-widget-resolver.mjs', str_replace('\\', '/', $runner->runs[0]['script']));
+        Http::assertNothingSent();
+    }
+
+    public function test_storefront_404_is_failed_system_not_kaspi_product_missing(): void
+    {
+        app()->instance(KaspiProductionCandidateClient::class, $this->fakeCandidateClient([[
+            'sku' => 'aut_612',
+            'slug' => 'real-production-slug-for-aut-612',
+            'name' => 'Remote product',
+            'kaspi_product_url' => null,
+            'storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/real-production-slug-for-aut-612',
+            'has_images' => false,
+            'has_description' => false,
+        ]]));
+        $runner = $this->fakeNodeRunner([
+            $this->processJson([
+                'ok' => false,
+                'sku' => 'aut_612',
+                'url' => null,
+                'method' => 'widget',
+                'reason' => 'not_found',
+                'status' => 'widget_not_found',
+                'page_url' => 'https://www.xn--80aesatk1az7g.kz/product/real-production-slug-for-aut-612',
+                'http_status' => 404,
+                'navigation_http_status' => 404,
+            ]),
+        ]);
+        app()->instance(KaspiLocalNodeProcessRunner::class, $runner);
+        app()->instance(KaspiLocalPageCollector::class, $this->fakeCollector());
+
+        $result = app(KaspiProductionBridgeService::class)->push(['sku' => ['aut_612'], 'dry_run' => true, 'debug' => true]);
+
+        $this->assertFalse($result['successful']);
+        $this->assertSame(0, $result['metrics']['kaspi_product_missing']);
+        $this->assertSame(1, $result['metrics']['failed_system']);
+        $this->assertSame('failed_system', $result['rows'][0]['status']);
+        $this->assertStringContainsString('storefront_product_url_invalid', $result['rows'][0]['debug_message']);
+        $this->assertSame(0, KaspiProductionPush::query()->count());
     }
 
     public function test_local_url_resolver_prefers_widget_and_builds_storefront_url_from_name(): void
@@ -275,7 +372,7 @@ class KaspiProductionBridgeServiceTest extends TestCase
             $this->processJson(['ok' => true, 'sku' => 'FDB060', 'url' => 'https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/?ksWidget=true&m=30366013', 'method' => 'widget', 'reason' => null]),
         ]);
 
-        $result = (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji щетка для чернения шин 6х6 см FDB060', true);
+        $result = (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji schetka dlya cherneniya shin 6h6 sm FDB060', true);
 
         $this->assertSame('https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/', $result['url']);
         $this->assertSame('widget', $result['method']);
@@ -285,24 +382,61 @@ class KaspiProductionBridgeServiceTest extends TestCase
         $this->assertSame(base_path(), $runner->runs[0]['cwd']);
     }
 
+    public function test_widget_resolved_kaspi_url_is_trusted_when_merchant_sku_is_not_in_public_url(): void
+    {
+        $runner = $this->fakeNodeRunner([
+            $this->processJson([
+                'ok' => true,
+                'sku' => 'aut_163',
+                'url' => 'https://kaspi.kz/shop/p/abro-418-mednyi-germetik-sprei-dlja-prokladok-0-4-l-163476477/',
+                'method' => 'widget',
+                'reason' => null,
+            ]),
+        ]);
+
+        $result = (new KaspiLocalUrlResolver($runner))->resolve('aut_163', 'ABRO copper sealant CG418R', true, [
+            'storefront_url' => 'https://xn--80aesatk1az7g.kz/product/abro-mednyy-germetik-sprey-bolshoy-cg418r',
+        ]);
+
+        $this->assertSame('https://kaspi.kz/shop/p/abro-418-mednyi-germetik-sprei-dlja-prokladok-0-4-l-163476477/', $result['url']);
+        $this->assertSame('widget', $result['method']);
+        $this->assertCount(1, $runner->runs);
+    }
+
     public function test_local_url_resolver_does_not_prefix_www_for_loopback_storefront_urls(): void
     {
         foreach (['http://127.0.0.1:8001', 'http://localhost:8001'] as $appUrl) {
             config(['app.url' => $appUrl]);
             $runner = $this->fakeNodeRunner([
-                $this->processJson(['ok' => false, 'sku' => 'FDB060', 'url' => null, 'method' => 'widget', 'reason' => 'not_found']),
-                $this->processJson(['ok' => true, 'sku' => 'FDB060', 'url' => 'https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/', 'method' => 'search', 'reason' => null]),
+                $this->processJson(['ok' => true, 'sku' => 'FDB060', 'url' => 'https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/', 'method' => 'widget', 'reason' => null]),
             ]);
 
-            $result = (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Loopback product', true);
+            $result = (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji schetka dlya cherneniya shin 6h6 sm FDB060', true);
 
-            $this->assertSame('search', $result['method']);
-            $this->assertCount(2, $runner->runs);
+            $this->assertSame('widget', $result['method']);
+            $this->assertCount(1, $runner->runs);
             $this->assertStringStartsWith($appUrl.'/product/', $runner->runs[0]['arguments']['url']);
             $this->assertStringNotContainsString('www.127.0.0.1', $runner->runs[0]['arguments']['url']);
             $this->assertStringNotContainsString('www.localhost', $runner->runs[0]['arguments']['url']);
         }
     }
+
+    public function test_local_url_resolver_uses_candidate_slug_before_sku_guess(): void
+    {
+        config(['app.url' => 'http://127.0.0.1:8001']);
+        $runner = $this->fakeNodeRunner([
+            $this->processJson(['ok' => true, 'sku' => 'aut_612', 'url' => 'https://kaspi.kz/shop/p/resolved-aut-612/', 'method' => 'widget', 'reason' => null]),
+        ]);
+
+        (new KaspiLocalUrlResolver($runner))->resolve('aut_612', 'Remote product', true, [
+            'slug' => 'real-production-slug-for-aut-612',
+        ]);
+
+        $this->assertCount(1, $runner->runs);
+        $this->assertSame('http://127.0.0.1:8001/product/real-production-slug-for-aut-612', $runner->runs[0]['arguments']['url']);
+        $this->assertStringNotContainsString('/product/aut-612', $runner->runs[0]['arguments']['url']);
+    }
+
     public function test_existing_production_url_skips_widget_and_search_resolution(): void
     {
         $runner = $this->fakeNodeRunner([]);
@@ -316,18 +450,21 @@ class KaspiProductionBridgeServiceTest extends TestCase
         $this->assertSame([], $runner->runs);
     }
 
-    public function test_widget_not_found_triggers_conservative_search_fallback(): void
+    public function test_widget_not_found_is_classified_missing_without_search_fallback(): void
     {
         $runner = $this->fakeNodeRunner([
             $this->processJson(['ok' => false, 'sku' => 'FDB060', 'url' => null, 'method' => 'widget', 'reason' => 'not_found']),
-            $this->processJson(['ok' => true, 'sku' => 'FDB060', 'url' => 'https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/', 'method' => 'search', 'reason' => null]),
         ]);
 
-        $result = (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji щетка', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('kaspi_product_missing');
 
-        $this->assertSame('search', $result['method']);
-        $this->assertCount(2, $runner->runs);
-        $this->assertStringEndsWith('scripts/kaspi-search-url-resolver.mjs', str_replace('\\', '/', $runner->runs[1]['script']));
+        try {
+            (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji Р В Р’В Р вЂ™Р’В Р В Р’В Р В РІР‚в„–Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В РІР‚в„ўР вЂ™Р’В°Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р Р†Р вЂљРІвЂћСћР В РІР‚в„ўР вЂ™Р’ВµР В Р’В Р вЂ™Р’В Р В Р’В Р В РІР‚в„–Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В Р Р‹Р Р†РІР‚С›РЎС›Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р В Р вЂ№Р В Р вЂ Р В РІР‚С™Р РЋРЎС™Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р Р†Р вЂљРІвЂћСћР В РІР‚в„ўР вЂ™Р’В°', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
+        } finally {
+            $this->assertCount(1, $runner->runs);
+            $this->assertStringEndsWith('scripts/kaspi-widget-resolver.mjs', str_replace('\\', '/', $runner->runs[0]['script']));
+        }
     }
 
     public function test_widget_browser_error_is_reported_without_search_fallback(): void
@@ -340,10 +477,58 @@ class KaspiProductionBridgeServiceTest extends TestCase
         $this->expectExceptionMessage('url_resolver_browser_error');
 
         try {
-            (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji щетка', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
+            (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji Р В Р’В Р вЂ™Р’В Р В Р’В Р В РІР‚в„–Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В РІР‚в„ўР вЂ™Р’В°Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р Р†Р вЂљРІвЂћСћР В РІР‚в„ўР вЂ™Р’ВµР В Р’В Р вЂ™Р’В Р В Р’В Р В РІР‚в„–Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В Р Р‹Р Р†РІР‚С›РЎС›Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р В Р вЂ№Р В Р вЂ Р В РІР‚С™Р РЋРЎС™Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р Р†Р вЂљРІвЂћСћР В РІР‚в„ўР вЂ™Р’В°', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
         } finally {
             $this->assertCount(1, $runner->runs);
         }
+    }
+
+    public function test_debug_command_prints_complete_widget_resolver_process_diagnostics(): void
+    {
+        $stdout = json_encode([
+            'ok' => false,
+            'sku' => 'LN7706',
+            'url' => null,
+            'method' => 'widget',
+            'reason' => 'browser_error',
+            'artifact_dir' => 'C:/tmp/kaspi-artifacts',
+            'page_url' => 'http://127.0.0.1:8001/product/ln7706',
+            'http_status' => 200,
+            'widget_found' => true,
+            'cloudflare_or_captcha' => false,
+            'network_failure_count' => 2,
+        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $stderr = "first playwright line\nsecond playwright line";
+
+        app()->instance(KaspiProductionCandidateClient::class, $this->fakeCandidateClient([[
+            'sku' => 'LN7706',
+            'name' => 'Remote product',
+            'kaspi_product_url' => null,
+            'storefront_url' => 'http://127.0.0.1:8001/product/ln7706',
+            'has_images' => false,
+            'has_description' => false,
+        ]]));
+        app()->instance(KaspiLocalNodeProcessRunner::class, $this->fakeNodeRunner([
+            $this->process($stdout, exitCode: 1, stderr: $stderr),
+        ]));
+        app()->instance(KaspiLocalPageCollector::class, $this->fakeCollector());
+
+        Artisan::call('kaspi:push-production', ['--sku' => ['LN7706'], '--dry-run' => true, '--debug' => true]);
+
+        $output = Artisan::output();
+        $this->assertStringContainsString('Resolver diagnostics', $output);
+        $this->assertStringContainsString('SKU: LN7706', $output);
+        $this->assertStringContainsString('Playwright exit code: 1', $output);
+        $this->assertStringContainsString('Final URL after navigation: http://127.0.0.1:8001/product/ln7706', $output);
+        $this->assertStringContainsString('HTTP status of the page: 200', $output);
+        $this->assertStringContainsString('Kaspi widget element exists: yes', $output);
+        $this->assertStringContainsString('Cloudflare/captcha detected: no', $output);
+        $this->assertStringContainsString('Artifact directory: C:/tmp/kaspi-artifacts', $output);
+        $this->assertStringContainsString('Network failures: 2', $output);
+        $this->assertStringContainsString('Complete Node stdout:', $output);
+        $this->assertStringContainsString($stdout, $output);
+        $this->assertStringContainsString('Complete Playwright stderr:', $output);
+        $this->assertStringContainsString($stderr, $output);
     }
 
     public function test_resolver_reports_empty_stdout_malformed_json_noise_and_nonzero_exit(): void
@@ -357,7 +542,7 @@ class KaspiProductionBridgeServiceTest extends TestCase
             $runner = $this->fakeNodeRunner([$this->process($stdout, $exitCode, $stderr)]);
 
             try {
-                (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji щетка', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
+                (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji Р В Р’В Р вЂ™Р’В Р В Р’В Р В РІР‚в„–Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В РІР‚в„ўР вЂ™Р’В°Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р Р†Р вЂљРІвЂћСћР В РІР‚в„ўР вЂ™Р’ВµР В Р’В Р вЂ™Р’В Р В Р’В Р В РІР‚в„–Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В Р Р‹Р Р†РІР‚С›РЎС›Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р В Р вЂ№Р В Р вЂ Р В РІР‚С™Р РЋРЎС™Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р Р†Р вЂљРІвЂћСћР В РІР‚в„ўР вЂ™Р’В°', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
                 $this->fail('Expected resolver exception.');
             } catch (\RuntimeException $exception) {
                 $this->assertStringContainsString($message, $exception->getMessage());
@@ -372,33 +557,33 @@ class KaspiProductionBridgeServiceTest extends TestCase
             $this->process("\xEF\xBB\xBF".json_encode(['ok' => true, 'sku' => 'FDB060', 'url' => 'https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/', 'method' => 'widget', 'reason' => null]), 0, 'warning on stderr'),
         ]);
 
-        $result = (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji щетка', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
+        $result = (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji Р В Р’В Р вЂ™Р’В Р В Р’В Р В РІР‚в„–Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В РІР‚в„ўР вЂ™Р’В°Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р Р†Р вЂљРІвЂћСћР В РІР‚в„ўР вЂ™Р’ВµР В Р’В Р вЂ™Р’В Р В Р’В Р В РІР‚в„–Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В Р Р‹Р Р†РІР‚С›РЎС›Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р В Р вЂ№Р В Р вЂ Р В РІР‚С™Р РЋРЎС™Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р Р†Р вЂљРІвЂћСћР В РІР‚в„ўР вЂ™Р’В°', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
 
         $this->assertSame('https://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/', $result['url']);
         $this->assertSame(17, $result['diagnostics']['stderr_bytes']);
     }
 
-    public function test_resolver_rejects_invalid_hosts_non_https_non_product_paths_and_sku_mismatch(): void
+    public function test_resolver_rejects_invalid_hosts_malformed_non_https_and_non_product_paths(): void
     {
         foreach ([
+            'not-a-url',
             'https://example.test/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/',
             'http://kaspi.kz/shop/p/mitsuji-schetka-fdb060-1-sht-171100340/',
             'https://kaspi.kz/shop/search/?text=FDB060',
-            'https://kaspi.kz/shop/p/another-product-123/',
+            'https://kaspi.kz/not-product',
         ] as $url) {
             $runner = $this->fakeNodeRunner([
                 $this->processJson(['ok' => true, 'sku' => 'FDB060', 'url' => $url, 'method' => 'widget', 'reason' => null]),
             ]);
 
             try {
-                (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji щетка', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
+                (new KaspiLocalUrlResolver($runner))->resolve('FDB060', 'Mitsiji РЎвЂ°Р ВµРЎвЂљР С”Р В°', true, ['storefront_url' => 'https://www.xn--80aesatk1az7g.kz/product/fdb060']);
                 $this->fail('Expected invalid URL exception.');
             } catch (\RuntimeException $exception) {
-                $this->assertContains($exception->getMessage(), ['url_resolver_invalid_url', 'url_resolver_sku_mismatch']);
+                $this->assertSame('url_resolver_invalid_url', $exception->getMessage());
             }
         }
     }
-
     private function payload(string $sku): array
     {
         return [
@@ -410,7 +595,7 @@ class KaspiProductionBridgeServiceTest extends TestCase
             'content' => [
                 'name' => 'Parsed name',
                 'description' => '<p>Parsed description</p>',
-                'attributes' => [['name' => 'Объем', 'value' => '1 л']],
+                'attributes' => [['name' => 'Volume', 'value' => '1 l']],
                 'images' => [['url' => 'https://resources.cdn-kaspi.kz/img/m/p/test/product/image.png', 'position' => 1]],
             ],
             'source' => ['collector' => 'local-playwright', 'parser_version' => '1'],
@@ -444,7 +629,7 @@ class KaspiProductionBridgeServiceTest extends TestCase
                         'description' => '<p>Parsed description</p>',
                         'cleaned' => [
                             'images' => ['https://resources.cdn-kaspi.kz/img/m/p/test/product/image.png'],
-                            'attributes' => [['name' => 'Объем', 'value' => '1 л']],
+                            'attributes' => [['name' => 'Volume', 'value' => '1 l']],
                         ],
                     ],
                     'artifact_dir' => null,

@@ -87,7 +87,9 @@ class KaspiProductionImportApiTest extends TestCase
         $this->assertNotContains('complete', $skus);
         $this->assertSame([
             'sku',
+            'slug',
             'name',
+            'storefront_url',
             'kaspi_product_url',
             'has_images',
             'has_description',
@@ -96,6 +98,25 @@ class KaspiProductionImportApiTest extends TestCase
         ], array_keys($response->json('data.0')));
         $this->assertArrayNotHasKey('price', $response->json('data.0'));
         $this->assertArrayNotHasKey('stock_quantity', $response->json('data.0'));
+    }
+
+    public function test_candidate_endpoint_includes_real_product_slug_and_storefront_url(): void
+    {
+        config(['app.url' => 'https://www.xn--80aesatk1az7g.kz']);
+        $product = $this->product('aut_612', [
+            'slug' => 'real-production-product-slug-aut-612',
+            'description' => '',
+            'kaspi_product_url' => null,
+        ]);
+
+        $response = $this->withToken('secret-token')->getJson('/api/internal/kaspi-content/candidates?sku[]=aut_612&limit=1');
+
+        $response->assertOk();
+        $this->assertSame($product->slug, $response->json('data.0.slug'));
+        $this->assertSame(
+            'https://www.xn--80aesatk1az7g.kz/product/real-production-product-slug-aut-612',
+            $response->json('data.0.storefront_url')
+        );
     }
 
     public function test_auto_locked_products_are_excluded_by_default_from_candidates(): void

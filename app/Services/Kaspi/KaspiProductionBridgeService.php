@@ -30,7 +30,14 @@ class KaspiProductionBridgeService
 
         $candidates = $this->candidateClient->fetch($options);
         $rows = [];
-        $metrics = ['candidates' => count($candidates), 'collected' => 0, 'sent' => 0, 'unchanged' => 0, 'blocked' => 0, 'not_found' => 0, 'failed' => 0, 'skipped' => 0];
+        $metrics = [
+            'resolved_from_existing' => 0,
+            'resolved_from_widget' => 0,
+            'kaspi_product_missing' => 0,
+            'imported' => 0,
+            'unchanged' => 0,
+            'failed_system' => 0,
+        ];
 
         foreach ($candidates as $candidate) {
             $sku = (string) ($candidate['sku'] ?? '');
@@ -38,7 +45,8 @@ class KaspiProductionBridgeService
                 $push = $this->existingReusablePush($sku, $force);
                 if ($push && ! $force) {
                     if ($push->status === 'sent') {
-                        $metrics['skipped']++;
+                        $metrics['unchanged']++;
+                        $this->incrementResolutionMetric($metrics, $push, $candidate);
                         $rows[] = $this->row($candidate, 'skipped', 'already_sent', $push);
                         continue;
                     }
@@ -46,7 +54,7 @@ class KaspiProductionBridgeService
                     $push = $this->collect($candidate, $debug);
                 }
 
-                $metrics['collected']++;
+                $this->incrementResolutionMetric($metrics, $push, $candidate);
 
                 if ($dryRun) {
                     $rows[] = $this->row($candidate, 'dry_run', 'production_send_skipped_dry_run', $push);
@@ -58,16 +66,34 @@ class KaspiProductionBridgeService
                 $this->recordResponse($push, $response['http_status'], $status, $response['body']);
 
                 match ($status) {
-                    'imported' => $metrics['sent']++,
+                    'imported' => $metrics['imported']++,
                     'unchanged' => $metrics['unchanged']++,
-                    'manual_content_protected' => $metrics['blocked']++,
-                    'product_not_found' => $metrics['not_found']++,
-                    default => $response['http_status'] >= 400 ? $metrics['failed']++ : $metrics['sent']++,
+                    default => $response['http_status'] >= 400 ? $metrics['failed_system']++ : $metrics['imported']++,
                 };
 
                 $rows[] = $this->row($candidate, $status, 'http_'.$response['http_status'], $push);
             } catch (Throwable $exception) {
-                $metrics['failed']++;
+                if ($this->isKaspiProductMissing($exception)) {
+                    $metrics['kaspi_product_missing']++;
+                    $rows[] = [
+                        'sku' => $sku,
+                        'candidate_status' => $this->candidateStatus($candidate),
+                        'kaspi_url' => $candidate['kaspi_product_url'] ?? null,
+                        'resolution_method' => 'widget',
+                        'image_count' => 0,
+                        'description_present' => false,
+                        'attribute_count' => 0,
+                        'payload_valid' => false,
+                        'status' => 'kaspi_product_missing',
+                        'message' => 'widget_not_found',
+                        'debug_message' => $debug ? $exception->getMessage() : null,
+                        'request_id' => null,
+                        'content_hash' => null,
+                    ];
+                    continue;
+                }
+
+                $metrics['failed_system']++;
                 $rows[] = [
                     'sku' => $sku,
                     'candidate_status' => $this->candidateStatus($candidate),
@@ -76,8 +102,9 @@ class KaspiProductionBridgeService
                     'description_present' => false,
                     'attribute_count' => 0,
                     'payload_valid' => false,
-                    'status' => 'failed',
+                    'status' => 'failed_system',
                     'message' => Utf8Sanitizer::errorForDb($exception, 300),
+                    'debug_message' => $debug ? $exception->getMessage() : null,
                     'request_id' => null,
                     'content_hash' => null,
                 ];
@@ -85,12 +112,31 @@ class KaspiProductionBridgeService
         }
 
         return [
-            'successful' => $metrics['failed'] === 0,
+            'successful' => $metrics['failed_system'] === 0,
             'message' => 'Kaspi production push complete. Products checked: '.count($candidates),
             'metrics' => $metrics,
             'rows' => $rows,
             'candidate_diagnostics' => $debug ? $this->candidateClient->diagnostics() : [],
         ];
+    }
+
+    private function incrementResolutionMetric(array &$metrics, KaspiProductionPush $push, array $candidate): void
+    {
+        $method = (string) data_get($push->collected_payload ?: [], 'source.url_resolution_method', filled($candidate['kaspi_product_url'] ?? null) ? 'existing' : '');
+
+        if ($method === 'existing') {
+            $metrics['resolved_from_existing']++;
+            return;
+        }
+
+        if ($method === 'widget') {
+            $metrics['resolved_from_widget']++;
+        }
+    }
+
+    private function isKaspiProductMissing(Throwable $exception): bool
+    {
+        return str_starts_with($exception->getMessage(), 'kaspi_product_missing');
     }
 
     private function collect(array $candidate, bool $debug): KaspiProductionPush
@@ -105,6 +151,7 @@ class KaspiProductionBridgeService
         if (blank($kaspiUrl)) {
             $resolved = $this->urlResolver->resolve($sku, (string) ($candidate['name'] ?? ''), $debug, [
                 'storefront_url' => $candidate['storefront_url'] ?? null,
+                'slug' => $candidate['slug'] ?? null,
             ]);
             $kaspiUrl = (string) $resolved['url'];
             $resolutionMethod = (string) ($resolved['method'] ?? 'unknown');
