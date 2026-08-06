@@ -40,6 +40,11 @@ class Category extends Model
         return $this->belongsToMany(Product::class)->withTimestamps();
     }
 
+    public function ozonProducts(): HasMany
+    {
+        return $this->hasMany(OzonProduct::class, 'site_category_id');
+    }
+
     public function getDisplayNameAttribute(): string
     {
         return StorefrontText::plain($this->name, 'Category '.$this->id);

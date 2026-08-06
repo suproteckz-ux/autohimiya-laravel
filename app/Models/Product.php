@@ -97,6 +97,11 @@ class Product extends Model
         return $this->hasMany(KaspiProductionPush::class);
     }
 
+    public function ozonProducts(): HasMany
+    {
+        return $this->hasMany(OzonProduct::class);
+    }
+
     public function canShowKaspiCreditButton(): bool
     {
         return filled($this->sku)

@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class AutomationRun extends Model
 {
@@ -58,6 +59,11 @@ class AutomationRun extends Model
     public function requestedBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'requested_by');
+    }
+
+    public function ozonOperations(): HasMany
+    {
+        return $this->hasMany(OzonOperation::class);
     }
 
     public function scopeActive(Builder $query): Builder

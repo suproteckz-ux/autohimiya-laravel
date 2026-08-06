@@ -1,0 +1,4 @@
+<?php
+namespace App\Filament\Resources\OzonProductResource\Pages;
+use App\Enums\OzonProductStatus; use App\Filament\Resources\OzonProductResource; use Filament\Schemas\Components\Tabs\Tab; use Filament\Resources\Pages\ListRecords; use Illuminate\Database\Eloquent\Builder;
+class ListOzonProducts extends ListRecords { protected static string $resource=OzonProductResource::class; public function getTabs(): array { return ['all'=>Tab::make('Все'),'draft'=>Tab::make('Черновики')->modifyQueryUsing(fn(Builder $q)=>$q->where('status',OzonProductStatus::Draft)),'ready'=>Tab::make('Готовы')->modifyQueryUsing(fn(Builder $q)=>$q->where('status',OzonProductStatus::Ready)),'failed'=>Tab::make('Ошибки')->modifyQueryUsing(fn(Builder $q)=>$q->whereIn('status',[OzonProductStatus::Failed,OzonProductStatus::NeedsFix,OzonProductStatus::Rejected]))]; } }
