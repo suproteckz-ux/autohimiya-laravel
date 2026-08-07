@@ -43,4 +43,9 @@ class OzonAccount extends Model
     {
         return $this->hasMany(OzonOperation::class);
     }
+
+    public function taxonomyNodes(): HasMany
+    {
+        return $this->hasMany(OzonTaxonomyNode::class);
+    }
 }

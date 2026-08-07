@@ -20,6 +20,8 @@ class OzonWarehouse extends Model
         return [
             'is_active' => 'boolean',
             'is_default' => 'boolean',
+            'is_api_confirmed' => 'boolean',
+            'api_confirmed_at' => 'datetime',
             'raw_payload' => 'array',
             'synced_at' => 'datetime',
         ];

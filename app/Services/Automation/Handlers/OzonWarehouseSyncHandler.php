@@ -1,0 +1,4 @@
+<?php
+namespace App\Services\Automation\Handlers;
+use App\Models\AutomationRun; use App\Models\OzonAccount; use App\Services\Automation\AutomationHandlerInterface; use App\Services\Automation\AutomationProgressReporterInterface; use App\Services\Ozon\OzonWarehouseService;
+class OzonWarehouseSyncHandler implements AutomationHandlerInterface { public function __construct(private readonly OzonWarehouseService $service) {} public function handle(AutomationRun $run, AutomationProgressReporterInterface $progress, bool $dryRun=false): array { $progress->start(1,'Загрузка складов Ozon.'); $result=$this->service->sync(OzonAccount::query()->findOrFail((int)($run->context['ozon_account_id'] ?? 0)),$run); $progress->setProgress(1,1,'Склады загружены.'); return [...$result,'total_items'=>$result['seen'],'processed_items'=>$result['seen'],'created_count'=>$result['created'],'updated_count'=>$result['updated'],'message'=>'Склады Ozon загружены.']; } }

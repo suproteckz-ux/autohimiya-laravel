@@ -9,6 +9,9 @@ use App\Services\Automation\Handlers\CatalogQualityReportHandler;
 use App\Services\Automation\Handlers\KaspiImportContentHandler;
 use App\Services\Automation\Handlers\KaspiResolveWidgetUrlsHandler;
 use App\Services\Automation\Handlers\PalomaSyncRemainsHandler;
+use App\Services\Automation\Handlers\OzonConnectionCheckHandler;
+use App\Services\Automation\Handlers\OzonTaxonomySyncHandler;
+use App\Services\Automation\Handlers\OzonWarehouseSyncHandler;
 use InvalidArgumentException;
 
 class AutomationHandlerRegistry
@@ -24,6 +27,9 @@ class AutomationHandlerRegistry
             AutomationType::KaspiImportContent->value => KaspiImportContentHandler::class,
             AutomationType::AutomationHealth->value => AutomationHealthHandler::class,
             AutomationType::CatalogQualityReport->value => CatalogQualityReportHandler::class,
+            AutomationType::OzonConnectionCheck->value => OzonConnectionCheckHandler::class,
+            AutomationType::OzonWarehouseSync->value => OzonWarehouseSyncHandler::class,
+            AutomationType::OzonTaxonomySync->value => OzonTaxonomySyncHandler::class,
         ];
     }
 
