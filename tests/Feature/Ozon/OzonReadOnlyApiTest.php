@@ -8,10 +8,13 @@ use App\Enums\OzonOperationType;
 use App\Exceptions\OzonApiException;
 use App\Models\OzonAccount;
 use App\Models\OzonOperation;
+use App\Models\OzonTaxonomyAttribute;
 use App\Models\OzonTaxonomyNode;
 use App\Models\OzonWarehouse;
 use App\Services\Automation\AutomationRunService;
+use App\Services\Automation\AutomationRunner;
 use App\Services\Ozon\OzonApiClient;
+use App\Services\Ozon\OzonConnectionService;
 use App\Services\Ozon\OzonTaxonomyService;
 use App\Services\Ozon\OzonWarehouseService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -19,6 +22,7 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
+use UnexpectedValueException;
 
 class OzonReadOnlyApiTest extends TestCase
 {
@@ -26,67 +30,132 @@ class OzonReadOnlyApiTest extends TestCase
 
     protected function setUp(): void { parent::setUp(); Http::preventStrayRequests(); }
 
-    public function test_successful_authorization_uses_required_headers_and_redacts_operation(): void
+    public function test_connection_uses_current_seller_info_contract_and_redacts_operation(): void
     {
         $account=OzonAccount::factory()->create(['client_id'=>'123','api_key'=>'super-secret']);
-        Http::fake([OzonApiClient::BASE_URL.'/*'=>Http::response(['result'=>[]],200,['x-request-id'=>'req-1'])]);
-        app(OzonApiClient::class)->post($account,'/v1/warehouse/list',['limit'=>1,'offset'=>0],OzonOperationType::ConnectionCheck);
-        Http::assertSent(fn(Request $request)=>$request->hasHeader('Client-Id','123')&&$request->hasHeader('Api-Key','super-secret'));
-        $serialized=OzonOperation::query()->first()->toJson();
-        $this->assertStringNotContainsString('super-secret',$serialized);
-        $this->assertStringNotContainsString('123',$serialized);
+        Http::fake([OzonApiClient::BASE_URL.'/v1/seller/info'=>Http::response(['company'=>['name'=>'Seller']],200,['x-request-id'=>'req-1'])]);
+        $result=app(OzonConnectionService::class)->check($account);
+        $this->assertTrue($result['successful']);
+        Http::assertSent(fn(Request $request)=>$request->url()===OzonApiClient::BASE_URL.'/v1/seller/info'&&$request->method()==='POST'&&$request->data()===[]&&$request->hasHeader('Client-Id','123')&&$request->hasHeader('Api-Key','super-secret'));
+        $operation=OzonOperation::query()->firstOrFail();
+        $this->assertSame('POST',$operation->http_method); $this->assertSame('req-1',$operation->request_id);
+        $this->assertStringNotContainsString('super-secret',$operation->toJson()); $this->assertStringNotContainsString('123',$operation->toJson());
     }
 
     #[DataProvider('authorizationErrors')]
-    public function test_authorization_errors_are_normalized(int $status): void
+    public function test_authorization_errors_are_normalized(int $status, string $code, string $message): void
     {
-        $account=OzonAccount::factory()->create(['api_key'=>'secret-value']); Http::fake([OzonApiClient::BASE_URL.'/*'=>Http::response(['message'=>'Access denied'], $status)]);
-        try { app(OzonApiClient::class)->post($account,'/v1/warehouse/list',[],OzonOperationType::ConnectionCheck); $this->fail('Exception expected'); }
-        catch(OzonApiException $e) { $this->assertSame($status,$e->httpStatus); $this->assertStringNotContainsString('secret-value',$e->getMessage()); }
+        $account=OzonAccount::factory()->create(['api_key'=>'secret-value']); Http::fake([OzonApiClient::BASE_URL.'/*'=>Http::response(['message'=>$message], $status)]);
+        try { app(OzonApiClient::class)->post($account,'/v1/seller/info',[],OzonOperationType::ConnectionCheck); $this->fail('Exception expected'); }
+        catch(OzonApiException $e) { $this->assertSame($status,$e->httpStatus); $this->assertSame($code,$e->errorCode); $this->assertStringNotContainsString('secret-value',$e->getMessage()); }
     }
-    public static function authorizationErrors(): array { return [[401],[403]]; }
+    public static function authorizationErrors(): array { return [[401,'invalid_client_id','Invalid Client-Id'],[401,'invalid_api_key','Invalid Api-Key'],[403,'insufficient_permissions','Access denied']]; }
+
+    public function test_obsolete_400_is_not_retried_and_has_safe_diagnostic(): void
+    {
+        $account=OzonAccount::factory()->create(['api_key'=>'obsolete-secret']); Http::fake([OzonApiClient::BASE_URL.'/*'=>Http::response(['message'=>'obsolete method cannot be used'],400)]);
+        try { app(OzonApiClient::class)->post($account,'/v1/seller/info',[],OzonOperationType::ConnectionCheck); $this->fail('Exception expected'); }
+        catch(OzonApiException $e) { $this->assertSame('obsolete_method',$e->errorCode); $this->assertStringContainsString('Ozon method is obsolete: POST /v1/seller/info',$e->getMessage()); }
+        Http::assertSentCount(1); $operation=OzonOperation::query()->firstOrFail(); $this->assertSame('obsolete_method',$operation->error_code); $this->assertStringNotContainsString('obsolete-secret',$operation->toJson());
+    }
 
     public function test_429_and_5xx_have_bounded_retry_and_retry_after_support(): void
     {
-        $account=OzonAccount::factory()->create(); Http::fakeSequence()->push(['message'=>'slow'],429,['Retry-After'=>'0'])->push(['message'=>'down'],500)->push(['result'=>[]],200);
-        app(OzonApiClient::class)->post($account,'/v1/warehouse/list',[],OzonOperationType::ConnectionCheck);
+        $account=OzonAccount::factory()->create(); Http::fakeSequence()->push(['message'=>'slow'],429,['Retry-After'=>'0'])->push(['message'=>'down'],502)->push(['company'=>['name'=>'Seller']],200);
+        app(OzonApiClient::class)->post($account,'/v1/seller/info',[],OzonOperationType::ConnectionCheck);
         Http::assertSentCount(3); $this->assertSame(3,OzonOperation::query()->first()->attempt);
+    }
+
+    #[DataProvider('serverErrors')]
+    public function test_each_supported_server_error_is_retried_at_most_three_times(int $status): void
+    {
+        $account=OzonAccount::factory()->create();
+        Http::fake([OzonApiClient::BASE_URL.'/*'=>Http::response(['message'=>'temporary'], $status)]);
+
+        try { app(OzonApiClient::class)->post($account,'/v1/seller/info',[],OzonOperationType::ConnectionCheck); $this->fail('Exception expected'); }
+        catch(OzonApiException $e) { $this->assertSame('ozon_unavailable',$e->errorCode); }
+
+        Http::assertSentCount(3);
+    }
+
+    public static function serverErrors(): array { return [[500],[502],[503]]; }
+
+    public function test_http_200_business_error_is_not_reported_as_success(): void
+    {
+        $account=OzonAccount::factory()->create();
+        Http::fake([OzonApiClient::BASE_URL.'/*'=>Http::response(['message'=>'Business rule failed'],200)]);
+
+        $this->expectException(OzonApiException::class);
+        try { app(OzonApiClient::class)->post($account,'/v1/seller/info',[],OzonOperationType::ConnectionCheck); }
+        finally { Http::assertSentCount(1); $this->assertSame('failed',OzonOperation::query()->firstOrFail()->status->value); }
     }
 
     public function test_timeout_retry_is_bounded_and_secret_safe(): void
     {
         $account=OzonAccount::factory()->create(['api_key'=>'timeout-secret']); Http::fake(fn()=>Http::failedConnection('timed out'));
         $this->expectException(OzonApiException::class);
-        try { app(OzonApiClient::class)->post($account,'/v1/warehouse/list',[],OzonOperationType::ConnectionCheck); }
+        try { app(OzonApiClient::class)->post($account,'/v1/seller/info',[],OzonOperationType::ConnectionCheck); }
         finally { Http::assertSentCount(3); $this->assertStringNotContainsString('timeout-secret',(string)OzonOperation::query()->first()?->error_message); }
     }
 
-    public function test_warehouse_import_updates_existing_and_preserves_manual_rows(): void
+    public function test_invalid_or_obsolete_endpoint_is_blocked_before_http(): void
     {
-        $account=OzonAccount::factory()->create(); $existing=OzonWarehouse::factory()->create(['ozon_account_id'=>$account->id,'ozon_warehouse_id'=>'10','name'=>'Old']); $manual=OzonWarehouse::factory()->create(['ozon_account_id'=>$account->id,'ozon_warehouse_id'=>'manual','is_api_confirmed'=>false]);
-        Http::fake([OzonApiClient::BASE_URL.'/*'=>Http::response(['result'=>[['warehouse_id'=>10,'name'=>'New','status'=>'ACTIVE'],['warehouse_id'=>20,'name'=>'Second','status'=>'ACTIVE']]],200)]);
-        $result=app(OzonWarehouseService::class)->sync($account);
-        $this->assertSame(1,$result['created']); $this->assertSame(1,$result['updated']); $this->assertSame('New',$existing->refresh()->name); $this->assertTrue($existing->is_api_confirmed); $this->assertDatabaseHas('ozon_warehouses',['id'=>$manual->id,'is_api_confirmed'=>false]);
+        $account=OzonAccount::factory()->create(); Http::fake();
+        foreach(['/v1/warehouse/list','/v3/product/import'] as $endpoint) { try { app(OzonApiClient::class)->post($account,$endpoint,[],OzonOperationType::ConnectionCheck); $this->fail('Exception expected'); } catch(OzonApiException $e) { $this->assertStringContainsString('not permitted',$e->getMessage()); } }
+        Http::assertNothingSent();
     }
 
-    public function test_taxonomy_tree_attributes_and_dictionary_values_are_cached(): void
+    public function test_warehouse_v2_cursor_import_updates_existing_and_preserves_local_state(): void
     {
         $account=OzonAccount::factory()->create();
-        Http::fakeSequence()->push(['result'=>[['description_category_id'=>1,'category_name'=>'Автохимия','type_id'=>2,'type_name'=>'Очиститель','children'=>[]]]],200)->push(['result'=>[['id'=>3,'name'=>'Бренд','dictionary_id'=>4,'is_required'=>true,'is_collection'=>false,'type'=>'String']]],200)->push(['result'=>[['id'=>5,'value'=>'Example']],'last_value_id'=>0],200);
-        $service=app(OzonTaxonomyService::class); $service->syncTree($account); $node=OzonTaxonomyNode::query()->firstOrFail(); $service->syncAttributes($node);
-        $this->assertSame('Автохимия',$node->category_name); $this->assertSame('Очиститель',$node->type_name); $this->assertSame('Example',$node->attributes()->first()->values_payload[0]['value']);
+        $existing=OzonWarehouse::factory()->create(['ozon_account_id'=>$account->id,'ozon_warehouse_id'=>'10','name'=>'Old','is_default'=>true]);
+        $manual=OzonWarehouse::factory()->create(['ozon_account_id'=>$account->id,'ozon_warehouse_id'=>'manual','is_api_confirmed'=>false]);
+        Http::fakeSequence()->push(['warehouses'=>[['warehouse_id'=>10,'name'=>'New','status'=>'ACTIVE','warehouse_type'=>'FBS'],['warehouse_id'=>20,'name'=>'Paused','status'=>['state'=>'INACTIVE']]],'cursor'=>'next','has_next'=>true],200)->push(['warehouses'=>[['warehouse_id'=>30,'name'=>'Third','is_archived'=>true]],'cursor'=>'','has_next'=>false],200);
+        $result=app(OzonWarehouseService::class)->sync($account);
+        $this->assertSame(2,$result['created']); $this->assertSame(1,$result['updated']); $this->assertSame(3,$result['seen']);
+        $this->assertSame('New',$existing->refresh()->name); $this->assertTrue($existing->is_default); $this->assertTrue($existing->is_api_confirmed);
+        $this->assertFalse(OzonWarehouse::query()->where('ozon_warehouse_id','20')->firstOrFail()->is_active); $this->assertFalse(OzonWarehouse::query()->where('ozon_warehouse_id','30')->firstOrFail()->is_active);
+        $this->assertDatabaseHas('ozon_warehouses',['id'=>$manual->id,'is_api_confirmed'=>false]);
+        Http::assertSent(fn(Request $request)=>$request->url()===OzonApiClient::BASE_URL.'/v2/warehouse/list'&&$request['limit']===100&&array_key_exists('cursor',$request->data()));
     }
 
-    public function test_allow_list_contains_no_write_product_price_stock_or_order_endpoint(): void
+    public function test_empty_warehouse_response_is_valid_but_malformed_response_is_rejected(): void
     {
-        $endpoints=implode(' ',OzonApiClient::allowedEndpoints());
-        foreach(['/product/import','/products/stocks','/product/import/prices','/posting/','/order/'] as $forbidden) $this->assertStringNotContainsString($forbidden,$endpoints);
+        $account=OzonAccount::factory()->create(); Http::fakeSequence()->push(['warehouses'=>[],'cursor'=>'','has_next'=>false],200)->push(['result'=>[]],200);
+        $this->assertSame(0,app(OzonWarehouseService::class)->sync($account)['seen']);
+        $this->expectException(UnexpectedValueException::class); app(OzonWarehouseService::class)->sync($account);
     }
 
-    public function test_automation_request_is_pending_and_duplicate_protected(): void
+    public function test_taxonomy_is_idempotent_and_dictionary_values_are_cached(): void
+    {
+        $account=OzonAccount::factory()->create();
+        Http::fakeSequence()->push(['result'=>[['description_category_id'=>1,'category_name'=>'Автохимия','type_id'=>2,'type_name'=>'Очиститель','disabled'=>false,'children'=>[]]]],200)->push(['result'=>[['description_category_id'=>1,'category_name'=>'Автохимия','type_id'=>2,'type_name'=>'Очиститель','disabled'=>false,'children'=>[]]]],200)->push(['result'=>[['id'=>3,'name'=>'Бренд','dictionary_id'=>4,'is_required'=>true,'is_collection'=>false,'type'=>'String']]],200)->push(['result'=>[['id'=>5,'value'=>'Example']],'last_value_id'=>0],200);
+        $service=app(OzonTaxonomyService::class); $service->syncTree($account); $service->syncTree($account); $node=OzonTaxonomyNode::query()->firstOrFail(); $service->syncAttributes($node);
+        $this->assertSame(1,OzonTaxonomyNode::query()->count()); $this->assertSame('Example',$node->attributes()->first()->values_payload[0]['value']);
+    }
+
+    public function test_failed_attribute_value_page_preserves_previous_attribute_data(): void
+    {
+        $account=OzonAccount::factory()->create(); $node=OzonTaxonomyNode::query()->create(['ozon_account_id'=>$account->id,'description_category_id'=>'1','category_name'=>'Old','type_id'=>'2','type_name'=>'Old','synced_at'=>now()]);
+        $attribute=OzonTaxonomyAttribute::query()->create(['ozon_taxonomy_node_id'=>$node->id,'attribute_id'=>'3','name'=>'Old','dictionary_id'=>'4','values_payload'=>[['id'=>1,'value'=>'Old']],'synced_at'=>now()]);
+        Http::fakeSequence()->push(['result'=>[['id'=>3,'name'=>'New','dictionary_id'=>4]]],200)->push(['message'=>'temporary'],503)->push(['message'=>'temporary'],503)->push(['message'=>'temporary'],503);
+        try { app(OzonTaxonomyService::class)->syncAttributes($node); $this->fail('Exception expected'); } catch(OzonApiException) {}
+        $this->assertSame('Old',$attribute->refresh()->name); $this->assertSame('Old',$attribute->values_payload[0]['value']);
+    }
+
+    public function test_allow_list_contains_only_current_read_only_endpoints(): void
+    {
+        $endpoints=OzonApiClient::allowedEndpoints();
+        $this->assertContains('/v1/seller/info',$endpoints); $this->assertContains('/v2/warehouse/list',$endpoints); $this->assertNotContains('/v1/warehouse/list',$endpoints);
+        foreach(['/product/import','/products/stocks','/product/import/prices','/posting/','/order/','archive','delete'] as $forbidden) $this->assertStringNotContainsString($forbidden,implode(' ',$endpoints));
+    }
+
+    public function test_automation_request_is_pending_duplicate_protected_and_runner_completes(): void
     {
         $account=OzonAccount::factory()->create(); $service=app(AutomationRunService::class);
-        $first=$service->request(AutomationType::OzonWarehouseSync,AutomationRunSource::Admin,null,['ozon_account_id'=>$account->id]); $second=$service->request(AutomationType::OzonWarehouseSync,AutomationRunSource::Admin,null,['ozon_account_id'=>$account->id]);
-        $this->assertTrue($first['created']); $this->assertFalse($second['created']); $this->assertSame('pending',$first['run']->status); $this->assertSame($first['run']->id,$second['run']->id);
+        $first=$service->request(AutomationType::OzonConnectionCheck,AutomationRunSource::Admin,null,['ozon_account_id'=>$account->id]); $second=$service->request(AutomationType::OzonConnectionCheck,AutomationRunSource::Admin,null,['ozon_account_id'=>$account->id]);
+        $this->assertTrue($first['created']); $this->assertFalse($second['created']); $this->assertSame('pending',$first['run']->status);
+        Http::fake([OzonApiClient::BASE_URL.'/v1/seller/info'=>Http::response(['company'=>['name'=>'Seller']],200)]); app(AutomationRunner::class)->runPending(runId:$first['run']->id,limit:1);
+        $this->assertSame('completed',$first['run']->refresh()->status); $this->assertNotNull($account->refresh()->last_connection_check_at);
     }
 }
