@@ -2,10 +2,13 @@
 
 namespace Tests\Feature\Ozon;
 
+use App\Filament\Pages\OzonProductExportPage;
 use App\Models\OzonAccount;
+use App\Models\OzonTaxonomyNode;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Livewire\Livewire;
 use Tests\TestCase;
 
 class OzonFilamentSmokeTest extends TestCase
@@ -38,5 +41,21 @@ class OzonFilamentSmokeTest extends TestCase
         $this->get('/admin/ozon-accounts/'.$account->id.'/edit')
             ->assertOk()
             ->assertDontSee('phase21-secret-never-render');
+    }
+
+    public function test_empty_valid_type_options_show_manual_fallback(): void
+    {
+        $account=OzonAccount::factory()->create();
+        OzonTaxonomyNode::query()->create(['ozon_account_id'=>$account->id,'description_category_id'=>'17000000','category_name'=>'Автохимия','type_id'=>'0','type_name'=>'','is_disabled'=>false,'synced_at'=>now()]);
+
+        $page=Livewire::test(OzonProductExportPage::class)->instance();
+        $method=new \ReflectionMethod($page,'preparationForm');
+        $components=collect($method->invoke($page))->keyBy(fn($component)=>$component->getName());
+
+        $this->assertSame([],$page->taxonomyOptions($account->id));
+        $this->assertSame('Типы Ozon ещё не загружены. Для теста можно ввести category/type вручную.',$page->taxonomyFallbackMessage());
+        $this->assertSame(['taxonomy'=>'Выбрать из Ozon','manual'=>'Ввести вручную'],$components->get('taxonomy_mode')->getOptions());
+        $this->assertSame('taxonomy',$components->get('taxonomy_mode')->getDefaultState());
+        foreach(['description_category_id','description_category_name','type_id','type_name'] as $field) $this->assertTrue($components->has($field));
     }
 }
