@@ -27,6 +27,16 @@ class OzonApiClient
 
     public function post(OzonAccount $account, string $endpoint, array $payload, OzonOperationType $type, ?AutomationRun $run = null): array
     {
+        return $this->request($account, $endpoint, $payload, $type, $run, false);
+    }
+
+    public function postEmptyJsonObject(OzonAccount $account, string $endpoint, OzonOperationType $type, ?AutomationRun $run = null): array
+    {
+        return $this->request($account, $endpoint, [], $type, $run, true);
+    }
+
+    private function request(OzonAccount $account, string $endpoint, array $payload, OzonOperationType $type, ?AutomationRun $run, bool $emptyJsonObject): array
+    {
         $method = 'POST';
         if ((self::ENDPOINTS[$endpoint] ?? null) !== $method) {
             throw new OzonApiException('Ozon endpoint is not permitted by the read-only client.');
@@ -49,9 +59,12 @@ class OzonApiClient
             do {
                 $attempt++;
                 try {
-                    $response = Http::baseUrl(self::BASE_URL)->acceptJson()->asJson()
+                    $request = Http::baseUrl(self::BASE_URL)->acceptJson()
                         ->withHeaders(['Client-Id' => $account->client_id, 'Api-Key' => $account->api_key])
-                        ->connectTimeout(5)->timeout(20)->post($endpoint, $payload);
+                        ->connectTimeout(5)->timeout(20);
+                    $response = $emptyJsonObject
+                        ? $request->withBody('{}', 'application/json')->post($endpoint)
+                        : $request->asJson()->post($endpoint, $payload);
                 } catch (ConnectionException) {
                     if ($attempt < 3) {
                         usleep(100_000 * $attempt);

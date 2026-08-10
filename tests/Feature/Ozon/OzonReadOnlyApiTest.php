@@ -36,7 +36,17 @@ class OzonReadOnlyApiTest extends TestCase
         Http::fake([OzonApiClient::BASE_URL.'/v1/seller/info'=>Http::response(['company'=>['name'=>'Seller']],200,['x-request-id'=>'req-1'])]);
         $result=app(OzonConnectionService::class)->check($account);
         $this->assertTrue($result['successful']);
-        Http::assertSent(fn(Request $request)=>$request->url()===OzonApiClient::BASE_URL.'/v1/seller/info'&&$request->method()==='POST'&&$request->data()===[]&&$request->hasHeader('Client-Id','123')&&$request->hasHeader('Api-Key','super-secret'));
+        Http::assertSent(function(Request $request): bool {
+            $body=$request->body();
+            return $request->url()===OzonApiClient::BASE_URL.'/v1/seller/info'
+                &&$request->method()==='POST'
+                &&$body==='{}'
+                &&str_starts_with($body,'{')
+                &&!str_starts_with($body,'[')
+                &&$request->hasHeader('Content-Type','application/json')
+                &&$request->hasHeader('Client-Id','123')
+                &&$request->hasHeader('Api-Key','super-secret');
+        });
         $operation=OzonOperation::query()->firstOrFail();
         $this->assertSame('POST',$operation->http_method); $this->assertSame('req-1',$operation->request_id);
         $this->assertStringNotContainsString('super-secret',$operation->toJson()); $this->assertStringNotContainsString('123',$operation->toJson());
@@ -57,6 +67,21 @@ class OzonReadOnlyApiTest extends TestCase
         try { app(OzonApiClient::class)->post($account,'/v1/seller/info',[],OzonOperationType::ConnectionCheck); $this->fail('Exception expected'); }
         catch(OzonApiException $e) { $this->assertSame('obsolete_method',$e->errorCode); $this->assertStringContainsString('Ozon method is obsolete: POST /v1/seller/info',$e->getMessage()); }
         Http::assertSentCount(1); $operation=OzonOperation::query()->firstOrFail(); $this->assertSame('obsolete_method',$operation->error_code); $this->assertStringNotContainsString('obsolete-secret',$operation->toJson());
+    }
+
+    public function test_proto_syntax_error_is_stored_without_credentials(): void
+    {
+        $account=OzonAccount::factory()->create(['client_id'=>'proto-client','api_key'=>'proto-secret']);
+        Http::fake([OzonApiClient::BASE_URL.'/v1/seller/info'=>Http::response(['message'=>'proto: syntax error (line 1:1): unexpected token ['],400)]);
+
+        try { app(OzonConnectionService::class)->check($account); $this->fail('Exception expected'); }
+        catch(OzonApiException $e) { $this->assertSame(400,$e->httpStatus); }
+
+        $operation=OzonOperation::query()->firstOrFail();
+        $this->assertSame('ozon_api_error',$operation->error_code);
+        $this->assertStringContainsString('proto: syntax error',$operation->error_message);
+        $this->assertStringNotContainsString('proto-secret',$operation->toJson());
+        $this->assertStringNotContainsString('proto-client',$operation->toJson());
     }
 
     public function test_429_and_5xx_have_bounded_retry_and_retry_after_support(): void
@@ -116,7 +141,7 @@ class OzonReadOnlyApiTest extends TestCase
         $this->assertSame('New',$existing->refresh()->name); $this->assertTrue($existing->is_default); $this->assertTrue($existing->is_api_confirmed);
         $this->assertFalse(OzonWarehouse::query()->where('ozon_warehouse_id','20')->firstOrFail()->is_active); $this->assertFalse(OzonWarehouse::query()->where('ozon_warehouse_id','30')->firstOrFail()->is_active);
         $this->assertDatabaseHas('ozon_warehouses',['id'=>$manual->id,'is_api_confirmed'=>false]);
-        Http::assertSent(fn(Request $request)=>$request->url()===OzonApiClient::BASE_URL.'/v2/warehouse/list'&&$request['limit']===100&&array_key_exists('cursor',$request->data()));
+        Http::assertSent(fn(Request $request)=>$request->url()===OzonApiClient::BASE_URL.'/v2/warehouse/list'&&str_starts_with($request->body(),'{')&&$request['limit']===100&&array_key_exists('cursor',$request->data()));
     }
 
     public function test_empty_warehouse_response_is_valid_but_malformed_response_is_rejected(): void
@@ -132,6 +157,9 @@ class OzonReadOnlyApiTest extends TestCase
         Http::fakeSequence()->push(['result'=>[['description_category_id'=>1,'category_name'=>'Автохимия','type_id'=>2,'type_name'=>'Очиститель','disabled'=>false,'children'=>[]]]],200)->push(['result'=>[['description_category_id'=>1,'category_name'=>'Автохимия','type_id'=>2,'type_name'=>'Очиститель','disabled'=>false,'children'=>[]]]],200)->push(['result'=>[['id'=>3,'name'=>'Бренд','dictionary_id'=>4,'is_required'=>true,'is_collection'=>false,'type'=>'String']]],200)->push(['result'=>[['id'=>5,'value'=>'Example']],'last_value_id'=>0],200);
         $service=app(OzonTaxonomyService::class); $service->syncTree($account); $service->syncTree($account); $node=OzonTaxonomyNode::query()->firstOrFail(); $service->syncAttributes($node);
         $this->assertSame(1,OzonTaxonomyNode::query()->count()); $this->assertSame('Example',$node->attributes()->first()->values_payload[0]['value']);
+        Http::assertSent(fn(Request $request)=>str_ends_with($request->url(),'/v1/description-category/tree')&&str_starts_with($request->body(),'{')&&$request['language']==='DEFAULT');
+        Http::assertSent(fn(Request $request)=>str_ends_with($request->url(),'/v1/description-category/attribute')&&$request['description_category_id']===1&&$request['type_id']===2);
+        Http::assertSent(fn(Request $request)=>str_ends_with($request->url(),'/v1/description-category/attribute/values')&&$request['limit']===5000&&array_key_exists('last_value_id',$request->data()));
     }
 
     public function test_failed_attribute_value_page_preserves_previous_attribute_data(): void
