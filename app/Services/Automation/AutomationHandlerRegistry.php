@@ -12,6 +12,8 @@ use App\Services\Automation\Handlers\PalomaSyncRemainsHandler;
 use App\Services\Automation\Handlers\OzonConnectionCheckHandler;
 use App\Services\Automation\Handlers\OzonTaxonomySyncHandler;
 use App\Services\Automation\Handlers\OzonWarehouseSyncHandler;
+use App\Services\Automation\Handlers\OzonProductExportHandler;
+use App\Services\Automation\Handlers\OzonProductExportStatusHandler;
 use InvalidArgumentException;
 
 class AutomationHandlerRegistry
@@ -30,6 +32,8 @@ class AutomationHandlerRegistry
             AutomationType::OzonConnectionCheck->value => OzonConnectionCheckHandler::class,
             AutomationType::OzonWarehouseSync->value => OzonWarehouseSyncHandler::class,
             AutomationType::OzonTaxonomySync->value => OzonTaxonomySyncHandler::class,
+            AutomationType::OzonProductExport->value => OzonProductExportHandler::class,
+            AutomationType::OzonProductExportStatus->value => OzonProductExportStatusHandler::class,
         ];
     }
 

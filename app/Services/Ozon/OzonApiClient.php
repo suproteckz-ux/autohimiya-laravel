@@ -8,6 +8,7 @@ use App\Exceptions\OzonApiException;
 use App\Models\AutomationRun;
 use App\Models\OzonAccount;
 use App\Models\OzonOperation;
+use App\Models\OzonProduct;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
@@ -17,34 +18,54 @@ class OzonApiClient
 {
     public const BASE_URL = 'https://api-seller.ozon.ru';
 
-    private const ENDPOINTS = [
+    public const PRODUCT_IMPORT_ENDPOINT = '/v3/product/import';
+    public const PRODUCT_IMPORT_INFO_ENDPOINT = '/v1/product/import/info';
+
+    private const READ_ONLY_ENDPOINTS = [
         '/v1/seller/info' => 'POST',
         '/v2/warehouse/list' => 'POST',
         '/v1/description-category/tree' => 'POST',
         '/v1/description-category/attribute' => 'POST',
         '/v1/description-category/attribute/values' => 'POST',
+        self::PRODUCT_IMPORT_INFO_ENDPOINT => 'POST',
+    ];
+
+    private const WRITE_ENDPOINTS = [
+        self::PRODUCT_IMPORT_ENDPOINT => 'POST',
     ];
 
     public function post(OzonAccount $account, string $endpoint, array $payload, OzonOperationType $type, ?AutomationRun $run = null): array
     {
-        return $this->request($account, $endpoint, $payload, $type, $run, false);
+        return $this->request($account, $endpoint, $payload, $type, $run, false, false);
     }
 
     public function postEmptyJsonObject(OzonAccount $account, string $endpoint, OzonOperationType $type, ?AutomationRun $run = null): array
     {
-        return $this->request($account, $endpoint, [], $type, $run, true);
+        return $this->request($account, $endpoint, [], $type, $run, true, false);
     }
 
-    private function request(OzonAccount $account, string $endpoint, array $payload, OzonOperationType $type, ?AutomationRun $run, bool $emptyJsonObject): array
+    public function postProductImport(OzonAccount $account, OzonProduct $product, array $payload, AutomationRun $run): array
+    {
+        return $this->request($account, self::PRODUCT_IMPORT_ENDPOINT, $payload, OzonOperationType::ProductExport, $run, false, true, $product);
+    }
+
+    public function postProductImportStatus(OzonAccount $account, OzonProduct $product, array $payload, AutomationRun $run): array
+    {
+        return $this->request($account, self::PRODUCT_IMPORT_INFO_ENDPOINT, $payload, OzonOperationType::StatusCheck, $run, false, false, $product);
+    }
+
+    private function request(OzonAccount $account, string $endpoint, array $payload, OzonOperationType $type, ?AutomationRun $run, bool $emptyJsonObject, bool $write, ?OzonProduct $product = null): array
     {
         $method = 'POST';
-        if ((self::ENDPOINTS[$endpoint] ?? null) !== $method) {
-            throw new OzonApiException('Ozon endpoint is not permitted by the read-only client.');
+        $allowed = $write ? self::WRITE_ENDPOINTS : self::READ_ONLY_ENDPOINTS;
+        if (($allowed[$endpoint] ?? null) !== $method) {
+            throw new OzonApiException($write ? 'Ozon write endpoint is not permitted.' : 'Ozon endpoint is not permitted by the read-only client.');
         }
 
         $operation = OzonOperation::query()->create([
             'ozon_account_id' => $account->id,
             'automation_run_id' => $run?->id,
+            'ozon_product_id' => $product?->id,
             'operation_key' => (string) str()->uuid(),
             'operation_type' => $type,
             'status' => OzonOperationStatus::Running,
@@ -120,7 +141,12 @@ class OzonApiClient
 
     public static function allowedEndpoints(): array
     {
-        return array_keys(self::ENDPOINTS);
+        return array_keys(self::READ_ONLY_ENDPOINTS);
+    }
+
+    public static function writeEndpoints(): array
+    {
+        return array_keys(self::WRITE_ENDPOINTS);
     }
 
     private function waitBeforeRetry(Response $response, int $attempt): void

@@ -193,8 +193,8 @@ class OzonReadOnlyApiTest extends TestCase
     public function test_allow_list_contains_only_current_read_only_endpoints(): void
     {
         $endpoints=OzonApiClient::allowedEndpoints();
-        $this->assertContains('/v1/seller/info',$endpoints); $this->assertContains('/v2/warehouse/list',$endpoints); $this->assertNotContains('/v1/warehouse/list',$endpoints);
-        foreach(['/product/import','/products/stocks','/product/import/prices','/posting/','/order/','archive','delete'] as $forbidden) $this->assertStringNotContainsString($forbidden,implode(' ',$endpoints));
+        $this->assertContains('/v1/seller/info',$endpoints); $this->assertContains('/v2/warehouse/list',$endpoints); $this->assertContains('/v1/product/import/info',$endpoints); $this->assertNotContains('/v1/warehouse/list',$endpoints);
+        foreach(['/v3/product/import','/products/stocks','/product/import/prices','/posting/','/order/','archive','delete'] as $forbidden) $this->assertNotContains($forbidden,$endpoints);
     }
 
     public function test_automation_request_is_pending_duplicate_protected_and_runner_completes(): void

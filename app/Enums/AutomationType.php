@@ -12,6 +12,8 @@ enum AutomationType: string
     case OzonConnectionCheck = 'ozon_connection_check';
     case OzonWarehouseSync = 'ozon_warehouse_sync';
     case OzonTaxonomySync = 'ozon_taxonomy_sync';
+    case OzonProductExport = 'ozon_product_export';
+    case OzonProductExportStatus = 'ozon_product_export_status';
 
     public function commandName(): string
     {
@@ -24,6 +26,8 @@ enum AutomationType: string
             self::OzonConnectionCheck => 'ozon:connection-check',
             self::OzonWarehouseSync => 'ozon:warehouse-sync',
             self::OzonTaxonomySync => 'ozon:taxonomy-sync',
+            self::OzonProductExport => 'ozon:product-export',
+            self::OzonProductExportStatus => 'ozon:product-export-status',
         };
     }
 
@@ -43,6 +47,8 @@ enum AutomationType: string
             self::OzonConnectionCheck => 'Проверка подключения Ozon',
             self::OzonWarehouseSync => 'Загрузка складов Ozon',
             self::OzonTaxonomySync => 'Загрузка taxonomy Ozon',
+            self::OzonProductExport => 'Отправка товара в Ozon',
+            self::OzonProductExportStatus => 'Проверка статуса товара Ozon',
         };
     }
 
@@ -65,7 +71,7 @@ enum AutomationType: string
                 'force' => false,
                 'delay_ms' => 3000,
             ],
-            self::AutomationHealth, self::CatalogQualityReport, self::OzonConnectionCheck, self::OzonWarehouseSync, self::OzonTaxonomySync => [],
+            self::AutomationHealth, self::CatalogQualityReport, self::OzonConnectionCheck, self::OzonWarehouseSync, self::OzonTaxonomySync, self::OzonProductExport, self::OzonProductExportStatus => [],
         };
     }
 
@@ -80,6 +86,8 @@ enum AutomationType: string
             'ozon:connection-check' => self::OzonConnectionCheck,
             'ozon:warehouse-sync' => self::OzonWarehouseSync,
             'ozon:taxonomy-sync' => self::OzonTaxonomySync,
+            'ozon:product-export' => self::OzonProductExport,
+            'ozon:product-export-status' => self::OzonProductExportStatus,
             default => null,
         };
     }
