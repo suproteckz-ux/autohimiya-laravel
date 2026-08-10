@@ -4,6 +4,7 @@ namespace Tests\Feature\Ozon;
 
 use App\Enums\OzonProductStatus;
 use App\Filament\Pages\OzonProductExportPage;
+use App\Filament\Resources\OzonProductResource\Pages\ListOzonProducts;
 use App\Models\OzonAccount;
 use App\Models\OzonTaxonomyNode;
 use App\Models\OzonWarehouse;
@@ -40,6 +41,39 @@ class OzonFilamentSmokeTest extends TestCase
         $this->get('/admin/ozon-accounts')->assertOk()->assertSee('Настройки кабинета');
         $this->get('/admin/ozon-product-export')->assertOk()->assertSee('Выберите категорию сайта, чтобы загрузить товары.');
         $this->get('/admin/ozon-products')->assertOk()->assertSee('Черновики')->assertSee('Готовы');
+    }
+
+    public function test_ozon_product_status_tabs_filter_records_and_accept_ready_query_string(): void
+    {
+        $draft = OzonProduct::factory()->create(['offer_id' => 'ER5', 'status' => OzonProductStatus::Draft]);
+        $ready = OzonProduct::factory()->create(['status' => OzonProductStatus::Ready]);
+        $failed = OzonProduct::factory()->create(['status' => OzonProductStatus::Failed]);
+        $needsFix = OzonProduct::factory()->create(['status' => OzonProductStatus::NeedsFix]);
+        $rejected = OzonProduct::factory()->create(['status' => OzonProductStatus::Rejected]);
+
+        Livewire::test(ListOzonProducts::class)
+            ->set('activeTab', 'all')
+            ->assertCanSeeTableRecords([$draft, $ready, $failed, $needsFix, $rejected]);
+
+        Livewire::test(ListOzonProducts::class)
+            ->set('activeTab', 'draft')
+            ->assertCanSeeTableRecords([$draft])
+            ->assertCanNotSeeTableRecords([$ready, $failed, $needsFix, $rejected]);
+
+        Livewire::test(ListOzonProducts::class)
+            ->set('activeTab', 'ready')
+            ->assertCanSeeTableRecords([$ready])
+            ->assertCanNotSeeTableRecords([$draft, $failed, $needsFix, $rejected]);
+
+        Livewire::test(ListOzonProducts::class)
+            ->set('activeTab', 'failed')
+            ->assertCanSeeTableRecords([$failed, $needsFix, $rejected])
+            ->assertCanNotSeeTableRecords([$draft, $ready]);
+
+        $this->get('/admin/ozon-products?tab=ready')
+            ->assertOk()
+            ->assertSee($ready->offer_id)
+            ->assertDontSee('ER5');
     }
 
     public function test_edit_page_never_renders_decrypted_api_key(): void
