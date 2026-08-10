@@ -93,4 +93,18 @@ class AutomationRunServiceTest extends TestCase
         $this->assertSame(1, $expired);
         $this->assertSame(AutomationRunStatus::Expired->value, AutomationRun::query()->first()->status);
     }
+
+    public function test_scheduler_and_global_runner_locks_are_bounded_and_preserved(): void
+    {
+        $schedule = file_get_contents(base_path('routes/console.php'));
+        $runner = file_get_contents(app_path('Services/Automation/AutomationRunner.php'));
+        $taxonomy = file_get_contents(app_path('Services/Ozon/OzonTaxonomyService.php'));
+
+        $this->assertStringContainsString("automation:run-pending --limit=1", $schedule);
+        $this->assertStringContainsString('withoutOverlapping(12)', $schedule);
+        $this->assertStringNotContainsString("automation:run-pending --limit=1')\n    ->everyMinute()\n    ->withoutOverlapping();", $schedule);
+        $this->assertStringContainsString("Cache::lock('automation:run-pending', self::GLOBAL_LOCK_SECONDS)", $runner);
+        $this->assertStringContainsString('public const GLOBAL_LOCK_SECONDS = 600', $runner);
+        $this->assertStringContainsString('$progress?->heartbeat', $taxonomy);
+    }
 }

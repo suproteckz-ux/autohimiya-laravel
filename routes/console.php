@@ -15,7 +15,7 @@ Schedule::command('automation:scheduler-heartbeat')
 
 Schedule::command('automation:run-pending --limit=1')
     ->everyMinute()
-    ->withoutOverlapping()
+    ->withoutOverlapping(12)
     ->appendOutputTo(storage_path('logs/automation-run-pending.log'));
 
 Schedule::command('automation:scheduler-heartbeat --queue')

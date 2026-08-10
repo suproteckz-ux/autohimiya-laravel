@@ -10,6 +10,8 @@ use Throwable;
 
 class AutomationRunner
 {
+    public const GLOBAL_LOCK_SECONDS = 600;
+
     public function __construct(
         private readonly AutomationHandlerRegistry $handlers,
         private readonly AutomationRunService $runs,
@@ -24,7 +26,7 @@ class AutomationRunner
         $this->runs->expireStaleRuns();
         $limit = max(1, $limit);
         $summary = ['processed' => 0, 'completed' => 0, 'failed' => 0, 'skipped' => 0];
-        $globalLock = Cache::lock('automation:run-pending', max(60, $limit * 300));
+        $globalLock = Cache::lock('automation:run-pending', self::GLOBAL_LOCK_SECONDS);
 
         if (! $globalLock->get()) {
             $summary['skipped']++;

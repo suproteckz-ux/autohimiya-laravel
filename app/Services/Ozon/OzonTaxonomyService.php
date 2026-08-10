@@ -7,6 +7,8 @@ use App\Models\AutomationRun;
 use App\Models\OzonAccount;
 use App\Models\OzonTaxonomyAttribute;
 use App\Models\OzonTaxonomyNode;
+use App\Services\Automation\AutomationProgressReporterInterface;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Throwable;
 
@@ -97,12 +99,7 @@ class OzonTaxonomyService
 
     public function syncAllAttributes(OzonAccount $account, ?AutomationRun $run = null): array
     {
-        $query = OzonTaxonomyNode::query()
-            ->where('ozon_account_id', $account->id)
-            ->where('is_disabled', false)
-            ->whereNotNull('type_id')
-            ->where('type_id', '!=', '')
-            ->where('type_id', '!=', '0');
+        $query = $this->activeTypeNodes($account);
 
         $stats = [
             'successful' => true,
@@ -131,6 +128,64 @@ class OzonTaxonomyService
                 }
             }
         });
+
+        return $stats;
+    }
+
+    public function syncAttributeBatch(
+        OzonAccount $account,
+        int $afterNodeId,
+        int $limit,
+        ?AutomationRun $run = null,
+        ?AutomationProgressReporterInterface $progress = null,
+        int $maxSeconds = 240,
+    ): array {
+        $limit = max(1, min(50, $limit));
+        $startedAt = microtime(true);
+        $baseQuery = $this->activeTypeNodes($account);
+        $total = (clone $baseQuery)->count();
+        $nodes = $baseQuery
+            ->where('id', '>', max(0, $afterNodeId))
+            ->orderBy('id')
+            ->limit($limit + 1)
+            ->get();
+        $hasMore = $nodes->count() > $limit;
+        $nodes = $nodes->take($limit);
+        $stats = [
+            'successful' => true,
+            'processed_items' => 0,
+            'type_nodes_total' => $total,
+            'type_nodes_processed' => 0,
+            'attributes_saved' => 0,
+            'dictionary_values_loaded' => 0,
+            'failed_nodes' => 0,
+            'warnings' => [],
+            'last_processed_node_id' => $afterNodeId,
+            'has_more' => $hasMore,
+        ];
+
+        foreach ($nodes as $node) {
+            if ($stats['type_nodes_processed'] > 0 && microtime(true) - $startedAt >= max(1, $maxSeconds)) {
+                $stats['has_more'] = true;
+
+                break;
+            }
+
+            try {
+                $result = $this->syncAttributes($node, $run);
+                $stats['processed_items'] += (int) $result['processed_items'];
+                $stats['attributes_saved'] += (int) $result['attributes_saved'];
+                $stats['dictionary_values_loaded'] += (int) $result['dictionary_values_loaded'];
+                $stats['warnings'] = [...$stats['warnings'], ...$result['warnings']];
+            } catch (Throwable $exception) {
+                $stats['failed_nodes']++;
+                $stats['warnings'][] = "Type {$node->type_id}: attributes were not loaded ({$this->safeError($exception)}).";
+            } finally {
+                $stats['type_nodes_processed']++;
+                $stats['last_processed_node_id'] = $node->id;
+                $progress?->heartbeat("Taxonomy Ozon: обработан type node {$node->id}.");
+            }
+        }
 
         return $stats;
     }
@@ -199,5 +254,15 @@ class OzonTaxonomyService
     private function safeError(Throwable $exception): string
     {
         return mb_substr($exception->getMessage(), 0, 300);
+    }
+
+    private function activeTypeNodes(OzonAccount $account): Builder
+    {
+        return OzonTaxonomyNode::query()
+            ->where('ozon_account_id', $account->id)
+            ->where('is_disabled', false)
+            ->whereNotNull('type_id')
+            ->where('type_id', '!=', '')
+            ->where('type_id', '!=', '0');
     }
 }

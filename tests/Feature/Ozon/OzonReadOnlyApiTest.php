@@ -7,6 +7,7 @@ use App\Enums\AutomationType;
 use App\Enums\OzonOperationType;
 use App\Exceptions\OzonApiException;
 use App\Models\OzonAccount;
+use App\Models\AutomationRun;
 use App\Models\OzonOperation;
 use App\Models\OzonTaxonomyAttribute;
 use App\Models\OzonTaxonomyNode;
@@ -235,6 +236,63 @@ class OzonReadOnlyApiTest extends TestCase
         $this->assertSame('Присадки в масло',$type->category_name);
         $this->assertSame('Присадка в моторное масло',$type->type_name);
         $this->assertDatabaseHas('ozon_taxonomy_attributes',['ozon_taxonomy_node_id'=>$type->id,'attribute_id'=>'30','name'=>'Бренд']);
+    }
+
+    public function test_taxonomy_batches_continue_without_starving_older_pending_types(): void
+    {
+        $account=OzonAccount::factory()->create();
+        $children=collect(range(1,25))->map(fn(int $id): array=>['type_id'=>1000+$id,'type_name'=>'Type '.$id,'disabled'=>false,'children'=>[]])->all();
+        Http::fake(function(Request $request) use($children) {
+            if(str_ends_with($request->url(),'/v1/description-category/tree')) return Http::response(['result'=>[['description_category_id'=>500,'category_name'=>'Category','children'=>$children]]],200);
+            if(str_ends_with($request->url(),'/v1/description-category/attribute')) return Http::response(['result'=>[['id'=>700,'name'=>'Аннотация','dictionary_id'=>0,'type'=>'String']]],200);
+            return Http::response(['message'=>'unexpected'],500);
+        });
+        $runs=app(AutomationRunService::class);
+        $taxonomy=$runs->request(AutomationType::OzonTaxonomySync,AutomationRunSource::Admin,null,['ozon_account_id'=>$account->id])['run'];
+        $health=$runs->request(AutomationType::AutomationHealth,AutomationRunSource::Admin)['run'];
+        $export=$runs->request(AutomationType::OzonProductExport,AutomationRunSource::Admin,null,['ozon_product_id'=>999999])['run'];
+
+        app(AutomationRunner::class)->runPending(runId:$taxonomy->id,limit:1);
+
+        $taxonomy->refresh();
+        $this->assertSame('completed',$taxonomy->status);
+        $this->assertSame(20,$taxonomy->context['processed_nodes']);
+        $this->assertSame(20,OzonTaxonomyAttribute::query()->count());
+        $continuation=AutomationRun::query()->where('type',AutomationType::OzonTaxonomySync->value)->where('status','pending')->sole();
+        $this->assertSame($taxonomy->id,$continuation->context['continued_from_run_id']);
+        $this->assertSame(20,$continuation->context['last_processed_node_id'] > 0 ? $continuation->context['processed_nodes'] : 0);
+
+        app(AutomationRunner::class)->runPending(limit:1);
+        $this->assertNotSame('pending',$health->refresh()->status);
+        $this->assertSame('pending',$export->refresh()->status);
+
+        app(AutomationRunner::class)->runPending(limit:1);
+        $this->assertSame('failed',$export->refresh()->status);
+        $this->assertSame('pending',$continuation->refresh()->status);
+
+        app(AutomationRunner::class)->runPending(limit:1);
+        $this->assertSame('completed',$continuation->refresh()->status);
+        $this->assertSame(25,$continuation->context['processed_nodes']);
+        $this->assertSame(25,OzonTaxonomyAttribute::query()->count());
+        $this->assertDatabaseCount('automation_runs',4);
+        Http::assertSentCount(26);
+    }
+
+    public function test_taxonomy_continuation_is_duplicate_protected(): void
+    {
+        $account=OzonAccount::factory()->create();
+        $current=app(AutomationRunService::class)->request(AutomationType::OzonTaxonomySync,AutomationRunSource::Admin,null,['ozon_account_id'=>$account->id])['run'];
+        $service=app(AutomationRunService::class);
+        $context=['ozon_account_id'=>$account->id,'last_processed_node_id'=>10,'processed_nodes'=>20];
+
+        $first=$service->requestContinuation($current,$context);
+        $second=$service->requestContinuation($current,$context);
+
+        $this->assertTrue($first['created']);
+        $this->assertFalse($second['created']);
+        $this->assertSame($first['run']->id,$second['run']->id);
+        $this->assertDatabaseCount('automation_runs',2);
+        Http::assertNothingSent();
     }
 
     public function test_allow_list_contains_only_current_read_only_endpoints(): void

@@ -68,6 +68,62 @@ class AutomationRunService
             ->first();
     }
 
+    /**
+     * Create at most one pending continuation for a completed batch.
+     *
+     * @param array<string, mixed> $context
+     * @return array{created: bool, run: AutomationRun}
+     */
+    public function requestContinuation(AutomationRun $current, array $context): array
+    {
+        $type = $current->automationType();
+
+        if (! $type) {
+            throw new RuntimeException('Cannot continue an unsupported automation type.');
+        }
+
+        $lock = Cache::lock('automation:continuation:'.$current->id, 30);
+
+        if (! $lock->get()) {
+            throw new RuntimeException('Could not acquire automation continuation lock.');
+        }
+
+        try {
+            return DB::transaction(function () use ($current, $context, $type): array {
+                $existing = AutomationRun::query()
+                    ->where('type', $type->value)
+                    ->where('status', AutomationRunStatus::Pending->value)
+                    ->get()
+                    ->first(fn (AutomationRun $run): bool => (int) ($run->context['continued_from_run_id'] ?? 0) === $current->id);
+
+                if ($existing) {
+                    return ['created' => false, 'run' => $existing];
+                }
+
+                $run = AutomationRun::query()->create([
+                    'type' => $type->value,
+                    'source' => $current->source,
+                    'requested_by' => $current->requested_by,
+                    'status' => AutomationRunStatus::Pending->value,
+                    'requested_at' => now(),
+                    'heartbeat_at' => now(),
+                    'progress' => 0,
+                    'context' => array_replace_recursive($type->defaultContext(), $context, [
+                        'continued_from_run_id' => $current->id,
+                    ]),
+                    'command_name' => $type->commandName(),
+                    'handler' => $type->handlerIdentifier(),
+                    'lock_key' => 'automation:'.$type->value,
+                    'message' => 'Ожидает продолжения пакетной обработки.',
+                ]);
+
+                return ['created' => true, 'run' => $run];
+            });
+        } finally {
+            optional($lock)->release();
+        }
+    }
+
     public function markSchedulerHeartbeat(): void
     {
         Cache::put('automation.scheduler_heartbeat_at', now()->toIso8601String(), now()->addHours(2));
