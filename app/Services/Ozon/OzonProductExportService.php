@@ -14,13 +14,18 @@ use Throwable;
 
 class OzonProductExportService
 {
-    public function __construct(private readonly OzonApiClient $client, private readonly OzonProductPayloadBuilder $payloads) {}
+    public function __construct(
+        private readonly OzonApiClient $client,
+        private readonly OzonProductPayloadBuilder $payloads,
+        private readonly OzonAnnotationAttributeResolver $annotations,
+    ) {}
 
     public function export(OzonProduct $product, AutomationRun $run): array
     {
         $product->loadMissing(['account', 'warehouse']);
         if (filled($product->ozon_task_id)) throw ValidationException::withMessages(['ozon_product' => 'Для товара уже сохранён task_id; повторная отправка заблокирована.']);
         if ($product->operations()->where('operation_type', OzonOperationType::ProductExport->value)->whereIn('status', [OzonOperationStatus::Pending->value, OzonOperationStatus::Running->value, OzonOperationStatus::Completed->value])->exists()) throw ValidationException::withMessages(['ozon_product' => 'Отправка товара уже поставлена или выполняется.']);
+        if (filled($product->prepared_description)) $this->annotations->resolve($product, $run);
         $payload = $this->payloads->build($product);
         $product->update(['status' => OzonProductStatus::Sending, 'last_error' => null]);
 

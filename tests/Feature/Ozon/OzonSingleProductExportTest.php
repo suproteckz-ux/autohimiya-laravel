@@ -17,6 +17,7 @@ use App\Models\OzonWarehouse;
 use App\Models\User;
 use App\Services\Automation\AutomationRunner;
 use App\Services\Automation\AutomationRunService;
+use App\Services\Ozon\OzonAnnotationAttributeResolver;
 use App\Services\Ozon\OzonApiClient;
 use App\Services\Ozon\OzonProductPayloadBuilder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -92,12 +93,91 @@ class OzonSingleProductExportTest extends TestCase
             $this->fail('Expected missing annotation validation error.');
         } catch (ValidationException $exception) {
             $this->assertSame(
-                'Для выбранной категории Ozon не загружена характеристика «Аннотация». Обновите taxonomy.',
+                'Для выбранной категории Ozon не удалось определить характеристику «Аннотация».',
                 $exception->errors()['ozon_product'][0],
             );
         }
 
         Http::assertNothingSent();
+    }
+
+    public function test_cached_annotation_is_reused_without_attribute_request(): void
+    {
+        $product=$this->product();
+        $run=$this->requestExport($product);
+        $resolver=app(OzonAnnotationAttributeResolver::class);
+
+        $first=$resolver->resolve($product,$run);
+        $second=$resolver->resolve($product,$run);
+
+        $this->assertSame('771234',$first->attribute_id);
+        $this->assertSame($first->id,$second->id);
+        Http::assertNothingSent();
+    }
+
+    public function test_missing_annotation_is_resolved_and_cached_on_demand(): void
+    {
+        $product=$this->product(['offer_id'=>'aut_1224','prepared_name'=>'Lucky Top New']);
+        OzonTaxonomyAttribute::query()->delete();
+        $run=$this->requestExport($product);
+        Http::fake([OzonApiClient::BASE_URL.'/v1/description-category/attribute'=>Http::response(['result'=>[
+            ['id'=>9048,'name'=>'Название модели','dictionary_id'=>0,'type'=>'String'],
+            ['attribute_id'=>881122,'name'=>'Аннотация','dictionary_id'=>0,'type'=>'String','is_required'=>false],
+        ]],200)]);
+        $resolver=app(OzonAnnotationAttributeResolver::class);
+
+        $resolved=$resolver->resolve($product,$run);
+        $cached=$resolver->resolve($product,$run);
+
+        $this->assertSame('881122',$resolved->attribute_id);
+        $this->assertSame($resolved->id,$cached->id);
+        $this->assertDatabaseCount('ozon_taxonomy_attributes',1);
+        $this->assertDatabaseMissing('ozon_taxonomy_attributes',['attribute_id'=>'9048']);
+        Http::assertSentCount(1);
+        Http::assertSent(fn($request)=>str_ends_with($request->url(),'/v1/description-category/attribute')
+            &&$request['description_category_id']===17028752
+            &&$request['type_id']===92258
+            &&$request['language']==='DEFAULT');
+    }
+
+    public function test_lucky_top_export_resolves_annotation_then_imports_product(): void
+    {
+        $description=str_repeat('Lucky Top description and site attributes. ',20);
+        $product=$this->product(['offer_id'=>'aut_1224','prepared_name'=>'Lucky Top New','prepared_description'=>$description]);
+        OzonTaxonomyAttribute::query()->delete();
+        Http::fake(function($request) {
+            if(str_ends_with($request->url(),'/v1/description-category/attribute')) return Http::response(['result'=>[['id'=>882244,'name'=>'Аннотация','dictionary_id'=>0,'type'=>'String']]],200);
+            if(str_ends_with($request->url(),'/v3/product/import')) return Http::response(['result'=>['task_id'=>1224001]],200);
+            return Http::response(['message'=>'unexpected'],500);
+        });
+        $run=$this->requestExport($product);
+
+        app(AutomationRunner::class)->runPending(runId:$run->id,limit:1);
+
+        $this->assertSame(OzonProductStatus::Processing,$product->fresh()->status);
+        $this->assertSame('1224001',$product->fresh()->ozon_task_id);
+        $this->assertDatabaseHas('ozon_taxonomy_attributes',['attribute_id'=>'882244','name'=>'Аннотация']);
+        $import=OzonOperation::query()->where('operation_type','product_export')->sole();
+        $item=$import->request_payload['items'][0];
+        $this->assertArrayNotHasKey('description',$item);
+        $this->assertSame(882244,$item['attributes'][0]['id']);
+        $this->assertSame($description,$item['attributes'][0]['values'][0]['value']);
+        Http::assertSentCount(2);
+    }
+
+    public function test_missing_on_demand_annotation_blocks_product_import(): void
+    {
+        $product=$this->product(['offer_id'=>'aut_1224','prepared_name'=>'Lucky Top New']);
+        OzonTaxonomyAttribute::query()->delete();
+        Http::fake([OzonApiClient::BASE_URL.'/v1/description-category/attribute'=>Http::response(['result'=>[['id'=>9048,'name'=>'Название модели']]],200)]);
+        $run=$this->requestExport($product);
+
+        app(AutomationRunner::class)->runPending(runId:$run->id,limit:1);
+
+        $this->assertSame('failed',$run->refresh()->status);
+        $this->assertStringContainsString('не удалось определить характеристику «Аннотация»',$run->error_message);
+        $this->assertDatabaseMissing('ozon_operations',['operation_type'=>'product_export']);
+        Http::assertSentCount(1);
     }
 
     public function test_model_attribute_remains_independent_from_annotation(): void

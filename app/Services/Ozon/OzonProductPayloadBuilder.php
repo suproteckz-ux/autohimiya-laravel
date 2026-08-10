@@ -34,7 +34,7 @@ class OzonProductPayloadBuilder
 
             if (! $annotation) {
                 throw ValidationException::withMessages([
-                    'ozon_product' => 'Для выбранной категории Ozon не загружена характеристика «Аннотация». Обновите taxonomy.',
+                    'ozon_product' => 'Для выбранной категории Ozon не удалось определить характеристику «Аннотация».',
                 ]);
             }
 
