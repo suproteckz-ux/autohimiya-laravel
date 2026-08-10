@@ -154,9 +154,10 @@ class OzonReadOnlyApiTest extends TestCase
     public function test_taxonomy_is_idempotent_and_dictionary_values_are_cached(): void
     {
         $account=OzonAccount::factory()->create();
-        Http::fakeSequence()->push(['result'=>[['description_category_id'=>1,'category_name'=>'Автохимия','type_id'=>2,'type_name'=>'Очиститель','disabled'=>false,'children'=>[]]]],200)->push(['result'=>[['description_category_id'=>1,'category_name'=>'Автохимия','type_id'=>2,'type_name'=>'Очиститель','disabled'=>false,'children'=>[]]]],200)->push(['result'=>[['id'=>3,'name'=>'Бренд','dictionary_id'=>4,'is_required'=>true,'is_collection'=>false,'type'=>'String']]],200)->push(['result'=>[['id'=>5,'value'=>'Example']],'last_value_id'=>0],200);
-        $service=app(OzonTaxonomyService::class); $service->syncTree($account); $service->syncTree($account); $node=OzonTaxonomyNode::query()->firstOrFail(); $service->syncAttributes($node);
-        $this->assertSame(1,OzonTaxonomyNode::query()->count()); $this->assertSame('Example',$node->attributes()->first()->values_payload[0]['value']);
+        $tree=['result'=>[['description_category_id'=>1,'category_name'=>'Присадки в масло','disabled'=>false,'children'=>[['type_id'=>2,'type_name'=>'Присадка в моторное масло','disabled'=>false,'children'=>[]]]]]];
+        Http::fakeSequence()->push($tree,200)->push($tree,200)->push(['result'=>[['id'=>3,'name'=>'Бренд','dictionary_id'=>4,'is_required'=>true,'is_collection'=>false,'type'=>'String']]],200)->push(['result'=>[['id'=>5,'value'=>'Example']],'last_value_id'=>0],200);
+        $service=app(OzonTaxonomyService::class); $service->syncTree($account); $service->syncTree($account); $node=OzonTaxonomyNode::query()->where('type_id','2')->firstOrFail(); $service->syncAttributes($node);
+        $this->assertSame(2,OzonTaxonomyNode::query()->count()); $this->assertSame('1',$node->description_category_id); $this->assertSame('Присадки в масло',$node->category_name); $this->assertSame('Присадка в моторное масло',$node->type_name); $this->assertSame('Example',$node->attributes()->first()->values_payload[0]['value']);
         Http::assertSent(fn(Request $request)=>str_ends_with($request->url(),'/v1/description-category/tree')&&str_starts_with($request->body(),'{')&&$request['language']==='DEFAULT');
         Http::assertSent(fn(Request $request)=>str_ends_with($request->url(),'/v1/description-category/attribute')&&$request['description_category_id']===1&&$request['type_id']===2);
         Http::assertSent(fn(Request $request)=>str_ends_with($request->url(),'/v1/description-category/attribute/values')&&$request['limit']===5000&&array_key_exists('last_value_id',$request->data()));
@@ -169,6 +170,24 @@ class OzonReadOnlyApiTest extends TestCase
         Http::fakeSequence()->push(['result'=>[['id'=>3,'name'=>'New','dictionary_id'=>4]]],200)->push(['message'=>'temporary'],503)->push(['message'=>'temporary'],503)->push(['message'=>'temporary'],503);
         try { app(OzonTaxonomyService::class)->syncAttributes($node); $this->fail('Exception expected'); } catch(OzonApiException) {}
         $this->assertSame('Old',$attribute->refresh()->name); $this->assertSame('Old',$attribute->values_payload[0]['value']);
+    }
+
+    public function test_taxonomy_automation_loads_tree_types_and_attributes(): void
+    {
+        $account=OzonAccount::factory()->create();
+        Http::fakeSequence()
+            ->push(['result'=>[['description_category_id'=>10,'category_name'=>'Присадки в масло','children'=>[['type_id'=>20,'type_name'=>'Присадка в моторное масло','children'=>[]]]]]],200)
+            ->push(['result'=>[['id'=>30,'name'=>'Бренд','dictionary_id'=>0,'is_required'=>true,'is_collection'=>false,'type'=>'String']]],200);
+        $run=app(AutomationRunService::class)->request(AutomationType::OzonTaxonomySync,AutomationRunSource::Admin,null,['ozon_account_id'=>$account->id])['run'];
+
+        app(AutomationRunner::class)->runPending(runId:$run->id,limit:1);
+
+        $this->assertSame('completed',$run->refresh()->status);
+        $type=OzonTaxonomyNode::query()->where('type_id','20')->firstOrFail();
+        $this->assertSame('10',$type->description_category_id);
+        $this->assertSame('Присадки в масло',$type->category_name);
+        $this->assertSame('Присадка в моторное масло',$type->type_name);
+        $this->assertDatabaseHas('ozon_taxonomy_attributes',['ozon_taxonomy_node_id'=>$type->id,'attribute_id'=>'30','name'=>'Бренд']);
     }
 
     public function test_allow_list_contains_only_current_read_only_endpoints(): void

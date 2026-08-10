@@ -58,4 +58,13 @@ class OzonFilamentSmokeTest extends TestCase
         $this->assertSame('taxonomy',$components->get('taxonomy_mode')->getDefaultState());
         foreach(['description_category_id','description_category_name','type_id','type_name'] as $field) $this->assertTrue($components->has($field));
     }
+
+    public function test_valid_imported_type_is_available_in_taxonomy_select(): void
+    {
+        $account=OzonAccount::factory()->create();
+        $node=OzonTaxonomyNode::query()->create(['ozon_account_id'=>$account->id,'description_category_id'=>'10','category_name'=>'Присадки в масло','type_id'=>'20','type_name'=>'Присадка в моторное масло','is_disabled'=>false,'synced_at'=>now()]);
+        $page=Livewire::test(OzonProductExportPage::class)->instance();
+
+        $this->assertSame([$node->id=>'Присадки в масло — Присадка в моторное масло'],$page->taxonomyOptions($account->id));
+    }
 }

@@ -29,6 +29,13 @@ class OzonTaxonomyService
         DB::transaction(function() use($node,$prepared): void { foreach($prepared as $row) { OzonTaxonomyAttribute::query()->updateOrCreate(['ozon_taxonomy_node_id'=>$node->id,'attribute_id'=>(string)($row['item']['id'] ?? '')],['name'=>(string)($row['item']['name'] ?? ''),'type'=>$row['item']['type'] ?? null,'dictionary_id'=>$row['dictionary_id'],'is_required'=>(bool)($row['item']['is_required'] ?? false),'is_collection'=>(bool)($row['item']['is_collection'] ?? false),'values_payload'=>$row['values'],'raw_payload'=>$row['item'],'synced_at'=>now()]); } });
         return ['successful'=>true,'processed_items'=>count($prepared)];
     }
+    public function syncAllAttributes(OzonAccount $account, ?AutomationRun $run=null): array
+    {
+        $types=OzonTaxonomyNode::query()->where('ozon_account_id',$account->id)->where('is_disabled',false)->whereNotNull('type_id')->where('type_id','!=','')->where('type_id','!=','0')->orderBy('id')->get();
+        $attributes=0;
+        foreach($types as $node) $attributes += (int)$this->syncAttributes($node,$run)['processed_items'];
+        return ['successful'=>true,'processed_items'=>$attributes,'processed_types'=>$types->count()];
+    }
     private function loadValues(OzonTaxonomyNode $node,string $attributeId,?AutomationRun $run): array
     {
         $last=0; $values=[];
@@ -43,10 +50,12 @@ class OzonTaxonomyService
     {
         $count=0;
         foreach($items as $item) {
-            $categoryId=(string)($item['description_category_id'] ?? '');
             $typeId=(string)($item['type_id'] ?? '0');
+            $hasType=(int)$typeId>0;
+            $categoryId=(string)($item['description_category_id'] ?? ($hasType ? $parent?->description_category_id : ''));
+            $categoryName=(string)($item['category_name'] ?? ($hasType ? $parent?->category_name : $categoryId));
             if($categoryId==='') { $count += $this->storeNodes($account,(array)($item['children'] ?? []),$parent); continue; }
-            $node=OzonTaxonomyNode::query()->updateOrCreate(['ozon_account_id'=>$account->id,'description_category_id'=>$categoryId,'type_id'=>$typeId],['parent_id'=>$parent?->id,'category_name'=>(string)($item['category_name'] ?? $categoryId),'type_name'=>(string)($item['type_name'] ?? ''),'is_disabled'=>(bool)($item['disabled'] ?? false),'raw_payload'=>$item,'synced_at'=>now()]);
+            $node=OzonTaxonomyNode::query()->updateOrCreate(['ozon_account_id'=>$account->id,'description_category_id'=>$categoryId,'type_id'=>$typeId],['parent_id'=>$parent?->id,'category_name'=>$categoryName,'type_name'=>(string)($item['type_name'] ?? ''),'is_disabled'=>(bool)($item['disabled'] ?? false),'raw_payload'=>$item,'synced_at'=>now()]);
             $count++; $count += $this->storeNodes($account,(array)($item['children'] ?? []),$node);
         }
         return $count;
