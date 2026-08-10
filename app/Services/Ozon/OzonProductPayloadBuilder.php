@@ -3,6 +3,7 @@
 namespace App\Services\Ozon;
 
 use App\Models\OzonProduct;
+use App\Models\OzonTaxonomyAttribute;
 use Illuminate\Validation\ValidationException;
 
 class OzonProductPayloadBuilder
@@ -22,8 +23,34 @@ class OzonProductPayloadBuilder
         if (! $product->warehouse || $product->warehouse->ozon_account_id !== $product->ozon_account_id) $errors[] = 'Склад не относится к выбранному аккаунту.';
         if ($errors !== []) throw ValidationException::withMessages(['ozon_product' => $errors]);
 
+        $attributes = array_values(array_filter(
+            $product->prepared_attributes ?? [],
+            fn ($attribute): bool => is_array($attribute)
+                && is_numeric($attribute['id'] ?? null)
+                && is_array($attribute['values'] ?? null),
+        ));
+
+        if (filled($product->prepared_description)) {
+            $annotation = $this->annotationAttribute($product);
+
+            if (! $annotation) {
+                throw ValidationException::withMessages([
+                    'ozon_product' => 'Для выбранной категории Ozon не загружена характеристика «Аннотация». Обновите taxonomy.',
+                ]);
+            }
+
+            $attributes[] = [
+                'id' => (int) $annotation->attribute_id,
+                'complex_id' => 0,
+                'values' => [[
+                    'dictionary_value_id' => 0,
+                    'value' => (string) $product->prepared_description,
+                ]],
+            ];
+        }
+
         $item = [
-            'attributes' => [],
+            'attributes' => $attributes,
             'complex_attributes' => [],
             'currency_code' => 'KZT',
             'description_category_id' => (int) $product->description_category_id,
@@ -41,9 +68,20 @@ class OzonProductPayloadBuilder
             'weight_unit' => 'g',
         ];
 
-        if (filled($product->prepared_description)) $item['description'] = (string) $product->prepared_description;
         if (filled($product->tnved_code)) $item['tnved_code'] = (string) $product->tnved_code;
 
         return ['items' => [$item]];
+    }
+
+    private function annotationAttribute(OzonProduct $product): ?OzonTaxonomyAttribute
+    {
+        return OzonTaxonomyAttribute::query()
+            ->whereHas('node', fn ($query) => $query
+                ->where('ozon_account_id', $product->ozon_account_id)
+                ->where('description_category_id', (string) $product->description_category_id)
+                ->where('type_id', (string) $product->type_id))
+            ->whereIn('name', ['Аннотация', 'аннотация', 'Описание товара', 'описание товара'])
+            ->orderByRaw("CASE WHEN name IN ('Аннотация', 'аннотация') THEN 0 ELSE 1 END")
+            ->first();
     }
 }

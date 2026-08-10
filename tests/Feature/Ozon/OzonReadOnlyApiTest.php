@@ -168,8 +168,55 @@ class OzonReadOnlyApiTest extends TestCase
         $account=OzonAccount::factory()->create(); $node=OzonTaxonomyNode::query()->create(['ozon_account_id'=>$account->id,'description_category_id'=>'1','category_name'=>'Old','type_id'=>'2','type_name'=>'Old','synced_at'=>now()]);
         $attribute=OzonTaxonomyAttribute::query()->create(['ozon_taxonomy_node_id'=>$node->id,'attribute_id'=>'3','name'=>'Old','dictionary_id'=>'4','values_payload'=>[['id'=>1,'value'=>'Old']],'synced_at'=>now()]);
         Http::fakeSequence()->push(['result'=>[['id'=>3,'name'=>'New','dictionary_id'=>4]]],200)->push(['message'=>'temporary'],503)->push(['message'=>'temporary'],503)->push(['message'=>'temporary'],503);
-        try { app(OzonTaxonomyService::class)->syncAttributes($node); $this->fail('Exception expected'); } catch(OzonApiException) {}
-        $this->assertSame('Old',$attribute->refresh()->name); $this->assertSame('Old',$attribute->values_payload[0]['value']);
+        $result=app(OzonTaxonomyService::class)->syncAttributes($node);
+        $this->assertSame(1,$result['attributes_saved']);
+        $this->assertCount(1,$result['warnings']);
+        $this->assertSame('New',$attribute->refresh()->name);
+        $this->assertSame('Old',$attribute->values_payload[0]['value']);
+    }
+
+    public function test_er5_type_node_receives_all_attributes_and_annotation_is_resolvable(): void
+    {
+        $account=OzonAccount::factory()->create();
+        Http::fakeSequence()
+            ->push(['result'=>[['description_category_id'=>17028752,'category_name'=>'Присадки в масло','children'=>[['type_id'=>92258,'type_name'=>'Присадка в моторное масло','disabled'=>false,'children'=>[]]]]]],200)
+            ->push(['result'=>[
+                ['id'=>71001,'name'=>'Аннотация','dictionary_id'=>0,'is_required'=>false,'is_collection'=>false,'type'=>'String'],
+                ['id'=>9048,'name'=>'Название модели','dictionary_id'=>0,'is_required'=>true,'is_collection'=>false,'type'=>'String'],
+                ['id'=>71003,'name'=>'Класс опасности','dictionary_id'=>0,'is_required'=>false,'is_collection'=>false,'type'=>'String'],
+                ['id'=>71004,'name'=>'Нужен код маркировки','dictionary_id'=>0,'is_required'=>false,'is_collection'=>false,'type'=>'Boolean'],
+                ['id'=>71005,'name'=>'ТН ВЭД коды ЕАЭС','dictionary_id'=>0,'is_required'=>false,'is_collection'=>true,'type'=>'String'],
+            ]],200);
+
+        $service=app(OzonTaxonomyService::class);
+        $service->syncTree($account);
+        $result=$service->syncAllAttributes($account);
+        $node=OzonTaxonomyNode::query()->where('description_category_id','17028752')->where('type_id','92258')->firstOrFail();
+
+        $this->assertSame(1,$result['type_nodes_total']);
+        $this->assertSame(1,$result['type_nodes_processed']);
+        $this->assertSame(5,$result['attributes_saved']);
+        $this->assertSame(0,$result['failed_nodes']);
+        $this->assertCount(5,$node->attributes);
+        $this->assertSame('71001',$node->attributes()->where('name','Аннотация')->firstOrFail()->attribute_id);
+    }
+
+    public function test_failed_type_node_does_not_stop_remaining_attribute_batch(): void
+    {
+        $account=OzonAccount::factory()->create();
+        OzonTaxonomyNode::query()->create(['ozon_account_id'=>$account->id,'description_category_id'=>'10','category_name'=>'One','type_id'=>'20','type_name'=>'One','is_disabled'=>false,'synced_at'=>now()]);
+        $second=OzonTaxonomyNode::query()->create(['ozon_account_id'=>$account->id,'description_category_id'=>'11','category_name'=>'Two','type_id'=>'21','type_name'=>'Two','is_disabled'=>false,'synced_at'=>now()]);
+        Http::fakeSequence()
+            ->push(['message'=>'invalid node'],400)
+            ->push(['result'=>[['id'=>31,'name'=>'Аннотация','dictionary_id'=>0,'type'=>'String']]],200);
+
+        $result=app(OzonTaxonomyService::class)->syncAllAttributes($account);
+
+        $this->assertSame(2,$result['type_nodes_total']);
+        $this->assertSame(2,$result['type_nodes_processed']);
+        $this->assertSame(1,$result['failed_nodes']);
+        $this->assertSame(1,$result['attributes_saved']);
+        $this->assertDatabaseHas('ozon_taxonomy_attributes',['ozon_taxonomy_node_id'=>$second->id,'attribute_id'=>'31']);
     }
 
     public function test_taxonomy_automation_loads_tree_types_and_attributes(): void

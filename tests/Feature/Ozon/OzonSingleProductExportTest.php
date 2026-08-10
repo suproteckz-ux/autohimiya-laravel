@@ -11,6 +11,8 @@ use App\Models\AutomationRun;
 use App\Models\OzonAccount;
 use App\Models\OzonOperation;
 use App\Models\OzonProduct;
+use App\Models\OzonTaxonomyAttribute;
+use App\Models\OzonTaxonomyNode;
 use App\Models\OzonWarehouse;
 use App\Models\User;
 use App\Services\Automation\AutomationRunner;
@@ -58,6 +60,79 @@ class OzonSingleProductExportTest extends TestCase
         $this->assertSame('g',$item['weight_unit']);
         $this->assertSame('mm',$item['dimension_unit']);
         $this->assertArrayNotHasKey('tnved_code',$item);
+        $this->assertArrayNotHasKey('description',$item);
+        $this->assertSame(771234,$item['attributes'][0]['id']);
+        $this->assertSame('Persisted description',$item['attributes'][0]['values'][0]['value']);
+        $this->assertSame(0,$item['attributes'][0]['values'][0]['dictionary_value_id']);
+    }
+
+    public function test_description_uses_er5_taxonomy_annotation_without_truncation_or_guessed_id(): void
+    {
+        $description = str_repeat('Полное описание ER5. ', 300);
+        $product = $this->product(['prepared_description' => $description]);
+
+        $item = app(OzonProductPayloadBuilder::class)->build($product)['items'][0];
+        $annotation = collect($item['attributes'])->sole(fn (array $attribute): bool => $attribute['id'] === 771234);
+
+        $this->assertArrayNotHasKey('description', $item);
+        $this->assertSame(0, $annotation['complex_id']);
+        $this->assertSame(0, $annotation['values'][0]['dictionary_value_id']);
+        $this->assertSame($description, $annotation['values'][0]['value']);
+        $this->assertNotSame(4191, $annotation['id']);
+        $this->assertNotSame(9048, $annotation['id']);
+    }
+
+    public function test_missing_annotation_taxonomy_attribute_blocks_export_before_http(): void
+    {
+        $product = $this->product();
+        OzonTaxonomyAttribute::query()->delete();
+
+        try {
+            app(OzonProductPayloadBuilder::class)->build($product);
+            $this->fail('Expected missing annotation validation error.');
+        } catch (ValidationException $exception) {
+            $this->assertSame(
+                'Для выбранной категории Ozon не загружена характеристика «Аннотация». Обновите taxonomy.',
+                $exception->errors()['ozon_product'][0],
+            );
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_model_attribute_remains_independent_from_annotation(): void
+    {
+        $product = $this->product();
+        $node = OzonTaxonomyNode::query()->where('ozon_account_id', $product->ozon_account_id)->sole();
+        OzonTaxonomyAttribute::query()->create([
+            'ozon_taxonomy_node_id' => $node->id,
+            'attribute_id' => '9048',
+            'name' => 'Название модели',
+            'type' => 'String',
+            'is_required' => true,
+            'is_collection' => false,
+            'synced_at' => now(),
+        ]);
+
+        $attributes = app(OzonProductPayloadBuilder::class)->build($product)['items'][0]['attributes'];
+
+        $this->assertSame([771234], array_column($attributes, 'id'));
+    }
+
+    public function test_annotation_is_appended_without_overwriting_existing_ozon_attributes(): void
+    {
+        $existing = [
+            'id' => 123456,
+            'complex_id' => 0,
+            'values' => [['dictionary_value_id' => 55, 'value' => 'Existing value']],
+        ];
+        $product = $this->product(['prepared_attributes' => [$existing]]);
+
+        $attributes = app(OzonProductPayloadBuilder::class)->build($product)['items'][0]['attributes'];
+
+        $this->assertCount(2, $attributes);
+        $this->assertSame($existing, $attributes[0]);
+        $this->assertSame(771234, $attributes[1]['id']);
     }
 
     public function test_er5_gate_blocks_other_offer_before_http(): void
@@ -184,6 +259,9 @@ class OzonSingleProductExportTest extends TestCase
     {
         $account=OzonAccount::factory()->create(['is_active'=>true,'api_key'=>'phase4-secret']);
         $warehouse=OzonWarehouse::factory()->create(['ozon_account_id'=>$account->id,'is_active'=>true,'is_api_confirmed'=>true]);
-        return OzonProduct::factory()->create(array_merge(['ozon_account_id'=>$account->id,'ozon_warehouse_id'=>$warehouse->id,'offer_id'=>'aut_737','prepared_name'=>'ER5 148мл','description_category_id'=>'17028752','description_category_name'=>'Автохимия','type_id'=>'92258','type_name'=>'Присадка','prepared_description'=>'Persisted description','prepared_images'=>['https://example.test/er5.jpg'],'prepared_attributes'=>[['name'=>'Объём','value'=>'148 мл']],'prepared_payload'=>['source'=>'persisted'],'calculated_price'=>'12600.00','calculated_stock'=>10,'weight_g'=>350,'width_mm'=>150,'height_mm'=>100,'depth_mm'=>100,'tnved_code'=>null,'status'=>OzonProductStatus::Ready],$overrides));
+        $product=OzonProduct::factory()->create(array_merge(['ozon_account_id'=>$account->id,'ozon_warehouse_id'=>$warehouse->id,'offer_id'=>'aut_737','prepared_name'=>'ER5 148мл','description_category_id'=>'17028752','description_category_name'=>'Автохимия','type_id'=>'92258','type_name'=>'Присадка','prepared_description'=>'Persisted description','prepared_images'=>['https://example.test/er5.jpg'],'prepared_attributes'=>[['name'=>'Объём','value'=>'148 мл']],'prepared_payload'=>['source'=>'persisted'],'calculated_price'=>'12600.00','calculated_stock'=>10,'weight_g'=>350,'width_mm'=>150,'height_mm'=>100,'depth_mm'=>100,'tnved_code'=>null,'status'=>OzonProductStatus::Ready],$overrides));
+        $node=OzonTaxonomyNode::query()->create(['ozon_account_id'=>$account->id,'description_category_id'=>$product->description_category_id,'category_name'=>$product->description_category_name,'type_id'=>$product->type_id,'type_name'=>$product->type_name,'is_disabled'=>false,'synced_at'=>now()]);
+        OzonTaxonomyAttribute::query()->create(['ozon_taxonomy_node_id'=>$node->id,'attribute_id'=>'771234','name'=>'Аннотация','type'=>'String','dictionary_id'=>'0','is_required'=>false,'is_collection'=>false,'raw_payload'=>['max_value_count'=>1],'synced_at'=>now()]);
+        return $product;
     }
 }
