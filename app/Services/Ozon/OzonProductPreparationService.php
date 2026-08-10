@@ -53,6 +53,67 @@ class OzonProductPreparationService
         return $rows;
     }
 
+    /**
+     * Prepare and persist each product independently.
+     *
+     * @return array{selected:int,saved:int,ready:int,draft:int,skipped:int,errors:array<int,array{product_id:int|null,message:string}>}
+     */
+    public function prepareAndPersistBatch(iterable $products, array $settings): array
+    {
+        $summary = ['selected' => 0, 'saved' => 0, 'ready' => 0, 'draft' => 0, 'skipped' => 0, 'errors' => []];
+
+        foreach ($products as $product) {
+            $summary['selected']++;
+
+            try {
+                $existing = OzonProduct::query()
+                    ->where('ozon_account_id', $settings['ozon_account_id'])
+                    ->where(function ($query) use ($product): void {
+                        $query->where('product_id', $product->getKey())
+                            ->orWhere('offer_id', (string) $product->sku);
+                    })
+                    ->first();
+
+                if ($existing !== null) {
+                    $summary['skipped']++;
+                    continue;
+                }
+
+                $prepared = $this->prepare($product, $settings);
+
+                if (! $prepared->validation->isReady()) {
+                    $summary['skipped']++;
+                    $summary['errors'][] = [
+                        'product_id' => $product->getKey(),
+                        'message' => implode('; ', $prepared->validation->errors),
+                    ];
+                    continue;
+                }
+
+                $saved = $this->save($prepared, $settings);
+
+                if ($saved === null) {
+                    $summary['skipped']++;
+                    continue;
+                }
+
+                $summary['saved']++;
+                $saved->status === OzonProductStatus::Ready
+                    ? $summary['ready']++
+                    : $summary['draft']++;
+            } catch (Throwable $exception) {
+                report($exception);
+                $summary['skipped']++;
+                $summary['errors'][] = [
+                    'product_id' => $product instanceof Product ? $product->getKey() : null,
+                    'message' => 'Не удалось подготовить товар.',
+                ];
+            }
+        }
+
+        return $summary;
+    }
+
     public function deleteIfLocal(OzonProduct $product): bool
     {
         if (! in_array($product->status, [OzonProductStatus::Draft, OzonProductStatus::Ready, OzonProductStatus::Failed], true)) return false;

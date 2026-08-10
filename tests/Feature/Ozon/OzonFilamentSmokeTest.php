@@ -76,41 +76,21 @@ class OzonFilamentSmokeTest extends TestCase
         $this->assertSame([$node->id=>'Присадки в масло — Присадка в моторное масло'],$page->taxonomyOptions($account->id));
     }
 
-    public function test_production_like_taxonomy_dry_run_returns_serializable_preview_without_writes(): void
+    public function test_bulk_action_persists_product_without_transient_preview(): void
     {
         [$product,$account,$warehouse,$node,$category]=$this->dryRunFixture();
         $before=$product->fresh()->only(['name','sku','category_id','price','quantity']);
 
-        $component=Livewire::test(OzonProductExportPage::class)
+        Livewire::test(OzonProductExportPage::class)
             ->filterTable('category',$category->id)
             ->callTableBulkAction('prepare',[$product],$this->taxonomyActionData($account,$warehouse,$node))
             ->assertHasNoErrors()
-            ->assertNotified('Dry-run готов')
-            ->assertSee('Dry-run выполнен локально. Данные в Ozon не отправлялись.')
-            ->assertSee('Готово к сохранению: 1')
-            ->assertSee('С предупреждениями: 0')
-            ->assertSee('С ошибками: 0')
-            ->assertSee($warehouse->name)
-            ->assertSee('Сохранить подготовленные товары')
-            ->assertSee('Вернуться к настройкам')
-            ->assertSee('Отмена');
+            ->assertNotified('Товары подготовлены локально')
+            ->assertSet('selectedTableRecords',[]);
 
-        $rows=$component->get('previewRows');
-        $this->assertArrayHasKey('html',$component->effects,'Livewire effects: '.json_encode(array_keys($component->effects)));
-        $this->assertArrayNotHasKey('partials',$component->effects,'The dry-run response must force a full component render so preview outside the table partial reaches the browser.');
-        $settings=$component->get('preparationSettings');
-        $this->assertCount(1,$rows);
-        $this->assertSame($product->id,$rows[0]['product_id']);
-        $this->assertSame($warehouse->name,$rows[0]['snapshot']['warehouse_name']);
-        $this->assertSame($node->type_id,$rows[0]['snapshot']['type_id']);
-        $this->assertIsArray($rows[0]['snapshot']);
-        $this->assertSame($before,$product->fresh()->only(array_keys($before)));
-        $this->assertDatabaseCount('ozon_products',0);
+        $this->assertDatabaseCount('ozon_products',1);
         $this->assertDatabaseCount('ozon_operations',0);
         $this->assertDatabaseCount('automation_runs',0);
-
-        $component->call('savePreparedProducts')->assertNotified('Товар подготовлен и сохранён локально.')->assertSet('previewRows',[])->assertSet('selectedTableRecords',[]);
-        $this->assertDatabaseCount('ozon_products',1);
         $saved=OzonProduct::query()->sole();
         $this->assertSame(OzonProductStatus::Ready,$saved->status);
         $this->assertSame($product->sku,$saved->offer_id);
@@ -132,6 +112,8 @@ class OzonFilamentSmokeTest extends TestCase
         $this->assertCount(1,$saved->prepared_attributes);
         $this->assertTrue($saved->price_sync_enabled);
         $this->assertTrue($saved->stock_sync_enabled);
+        $this->assertFalse($saved->content_sync_enabled);
+        $this->assertNull($saved->last_error);
         $this->assertSame('1.0000',$saved->price_multiplier);
         $this->assertSame('none',$saved->rounding_rule);
         $this->assertSame('3402',$saved->tnved_code);
@@ -139,14 +121,18 @@ class OzonFilamentSmokeTest extends TestCase
         $this->assertSame(5,$saved->calculated_stock);
         $this->assertSame($before,$product->fresh()->only(array_keys($before)));
         $this->get('/admin/ozon-products')->assertOk()->assertSee($product->name)->assertSee($product->sku);
+        Livewire::test(\App\Filament\Resources\OzonProductResource\Pages\ListOzonProducts::class)->assertSee($product->name)->assertSee($product->sku);
+        $this->view('filament.ozon.snapshot',['record'=>$saved])->assertSee($product->name)->assertSee($product->sku)->assertSee('Полный snapshot');
 
-        $component->set('previewRows',$rows)->set('preparationSettings',$settings)->call('savePreparedProducts');
+        Livewire::test(OzonProductExportPage::class)->filterTable('category',$category->id)->callTableBulkAction('prepare',[$product],$this->taxonomyActionData($account,$warehouse,$node));
         $this->assertDatabaseCount('ozon_products',1);
         $this->assertSame($product->sku,$saved->fresh()->offer_id);
+        $this->assertFalse(property_exists(OzonProductExportPage::class,'previewRows'));
+        $this->assertFalse(method_exists(OzonProductExportPage::class,'savePreparedProducts'));
         Http::assertNothingSent();
     }
 
-    public function test_manual_dry_run_works_and_internal_error_gets_safe_notification(): void
+    public function test_manual_preparation_persists_draft_and_internal_error_is_safe(): void
     {
         [$product,$account,$warehouse,,$category]=$this->dryRunFixture();
         $manual=array_merge($this->taxonomyActionData($account,$warehouse,null),[
@@ -154,22 +140,18 @@ class OzonFilamentSmokeTest extends TestCase
         ]);
         unset($manual['ozon_taxonomy_node_id']);
 
-        $manualComponent=Livewire::test(OzonProductExportPage::class)->filterTable('category',$category->id)->callTableBulkAction('prepare',[$product],$manual)->assertNotified('Dry-run готов');
-        $manualComponent->call('savePreparedProducts')->assertNotified('Товар подготовлен и сохранён локально.');
+        Livewire::test(OzonProductExportPage::class)->filterTable('category',$category->id)->callTableBulkAction('prepare',[$product],$manual)->assertNotified('Товары подготовлены локально');
         $this->assertSame(OzonProductStatus::Draft,OzonProduct::query()->sole()->status);
-        $this->mock(OzonProductPreparationService::class)->shouldReceive('prepareBatch')->once()->andThrow(new \RuntimeException('internal detail must not reach the user'));
-        Livewire::test(OzonProductExportPage::class)->filterTable('category',$category->id)->callTableBulkAction('prepare',[$product],$manual)->assertNotified('Dry-run не выполнен')->assertSet('previewRows',[])->assertDontSee('internal detail must not reach the user');
+        $this->mock(OzonProductPreparationService::class)->shouldReceive('prepareAndPersistBatch')->once()->andThrow(new \RuntimeException('internal detail must not reach the user'));
+        Livewire::test(OzonProductExportPage::class)->filterTable('category',$category->id)->callTableBulkAction('prepare',[$product],$manual)->assertNotified('Подготовка не выполнена')->assertDontSee('internal detail must not reach the user');
         Http::assertNothingSent();
     }
 
-    public function test_critical_preview_is_not_saved(): void
+    public function test_critical_item_is_not_saved(): void
     {
         [$product,$account,$warehouse,$node,$category]=$this->dryRunFixture();
-        $component=Livewire::test(OzonProductExportPage::class)->filterTable('category',$category->id)->callTableBulkAction('prepare',[$product],$this->taxonomyActionData($account,$warehouse,$node));
-        $rows=$component->get('previewRows');
-        $rows[0]['errors']=['Критическая ошибка'];
-        $rows[0]['is_ready']=false;
-        $component->set('previewRows',$rows)->call('savePreparedProducts')->assertNotified('Товар подготовлен и сохранён локально.');
+        $product->update(['price'=>0]);
+        Livewire::test(OzonProductExportPage::class)->filterTable('category',$category->id)->callTableBulkAction('prepare',[$product],$this->taxonomyActionData($account,$warehouse,$node))->assertNotified('Товары подготовлены локально');
 
         $this->assertDatabaseCount('ozon_products',0);
         $this->assertSame('Тестовый товар',$product->fresh()->name);
