@@ -12,7 +12,6 @@ class OzonProductPayloadBuilder
     {
         $images = array_values(array_filter($product->prepared_images ?? [], fn ($url): bool => is_string($url) && $url !== ''));
         $errors = [];
-        if ($product->offer_id !== 'aut_737') $errors[] = 'На тестовом этапе разрешена отправка только ER5 (aut_737).';
         if (! $product->account?->is_active) $errors[] = 'Аккаунт Ozon неактивен.';
         if (! in_array($product->status->value, ['draft', 'ready', 'failed', 'queued'], true)) $errors[] = 'Текущий статус товара не допускает отправку.';
         if (! filled($product->offer_id)) $errors[] = 'Не заполнен offer_id.';

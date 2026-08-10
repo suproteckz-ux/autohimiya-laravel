@@ -135,11 +135,39 @@ class OzonSingleProductExportTest extends TestCase
         $this->assertSame(771234, $attributes[1]['id']);
     }
 
-    public function test_er5_gate_blocks_other_offer_before_http(): void
+    public function test_non_er5_prepared_product_builds_export_payload(): void
     {
-        $product=$this->product(['offer_id'=>'OTHER']);
+        $product=$this->product(['offer_id'=>'aut_1224','prepared_name'=>'Lucky Top New']);
+
+        $item=app(OzonProductPayloadBuilder::class)->build($product)['items'][0];
+
+        $this->assertSame('aut_1224',$item['offer_id']);
+        $this->assertSame('Lucky Top New',$item['name']);
+        Http::assertNothingSent();
+    }
+
+    public function test_invalid_non_er5_product_is_still_blocked_before_http(): void
+    {
+        $product=$this->product(['offer_id'=>'aut_1224','prepared_name'=>'']);
         $this->expectException(ValidationException::class);
         try { app(OzonProductPayloadBuilder::class)->build($product); } finally { Http::assertNothingSent(); }
+    }
+
+    public function test_lucky_top_action_creates_pending_run_for_exact_product_without_http(): void
+    {
+        $product=$this->product(['offer_id'=>'aut_1224','prepared_name'=>'Lucky Top New']);
+
+        Livewire::test(ListOzonProducts::class)
+            ->callTableAction('export',$product)
+            ->assertNotified('Отправка поставлена в очередь.');
+
+        $run=AutomationRun::query()->sole();
+        $this->assertSame(AutomationType::OzonProductExport->value,$run->type);
+        $this->assertSame('pending',$run->status);
+        $this->assertSame($product->id,$run->context['ozon_product_id']);
+        $this->assertSame(OzonProductStatus::Queued,$product->fresh()->status);
+        $this->assertDatabaseCount('ozon_operations',0);
+        Http::assertNothingSent();
     }
 
     public function test_filament_action_only_queues_and_handler_sends_once(): void
