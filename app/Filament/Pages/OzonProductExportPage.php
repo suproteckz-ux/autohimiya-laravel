@@ -31,6 +31,7 @@ use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
+use Throwable;
 use UnitEnum;
 
 class OzonProductExportPage extends Page implements HasTable
@@ -53,19 +54,40 @@ class OzonProductExportPage extends Page implements HasTable
             ->columns([ImageColumn::make('primaryImage.path')->label('Фото')->height(48),TextColumn::make('name')->label('Название')->limit(40)->wrap(),TextColumn::make('sku')->label('SKU'),TextColumn::make('brand.name')->label('Бренд'),TextColumn::make('category.name')->label('Категория'),TextColumn::make('price')->label('Цена'),TextColumn::make('quantity')->label('Остаток'),TextColumn::make('images_count')->label('Фото'),IconColumn::make('description')->label('Описание')->state(fn(Product $r)=>filled($r->description))->boolean(),TextColumn::make('attributes_count')->label('Характеристики'),TextColumn::make('ozon_status')->label('Ozon-статус')->state(fn(Product $r)=>$r->relationLoaded('ozonProducts')?($r->ozonProducts->first()?->status?->label()??'Не добавлен'):'Выберите аккаунт')->badge(),TextColumn::make('readiness')->label('Готовность')->state(fn(Product $r)=>$this->blockingReason($r)===null?'Можно подготовить':'Заблокирован')->badge(),TextColumn::make('blocking_reason')->label('Причина блокировки')->state(fn(Product $r)=>$this->blockingReason($r)??'—')->wrap()])
             ->filters([SelectFilter::make('category')->label('Категория сайта')->options(fn()=>AdminCategoryOptions::active())->searchable()->query(fn(Builder $query)=>$query),SelectFilter::make('account')->label('Аккаунт Ozon')->options(fn()=>OzonAccount::query()->pluck('name','id'))->query(fn(Builder $query)=>$query),SelectFilter::make('brand')->label('Бренд')->options(fn()=>Brand::query()->orderBy('name')->pluck('name','id'))->query(fn(Builder $query)=>$query),Filter::make('options')->form([Checkbox::make('include_descendants')->label('Включать дочерние категории'),Checkbox::make('include_additional_categories')->label('Учитывать дополнительные категории'),Checkbox::make('active_only')->label('Только активные'),Checkbox::make('in_stock_only')->label('Остаток больше нуля'),Checkbox::make('priced_only')->label('Цена больше нуля'),Checkbox::make('has_image')->label('Есть главное фото'),Checkbox::make('has_description')->label('Есть описание'),Checkbox::make('has_attributes')->label('Есть характеристики'),Checkbox::make('not_added')->label('Ещё не добавлены в кабинет')]),Filter::make('search')->form([TextInput::make('sku')->label('SKU'),TextInput::make('name')->label('Название')])])
             ->bulkActions([BulkAction::make('prepare')->label('Подготовить для Ozon')->form($this->preparationForm())->action(function(Collection $records,array $data): void {
+                $this->runDryRun($records, $data);
+            })->modalSubmitActionLabel('Выполнить dry-run')]);
+    }
+
+    public function runDryRun(Collection $records, array $data): void
+    {
+        try {
                 if (($data['taxonomy_mode'] ?? 'taxonomy') === 'manual') {
                     $data = array_merge($data, ['description_category_id'=>(string)$data['description_category_id'],'description_category_name'=>trim((string)$data['description_category_name']),'type_id'=>(string)$data['type_id'],'type_name'=>trim((string)$data['type_name']),'manual_taxonomy_unverified'=>true,'manual_warehouse'=>false]);
                 } else {
                     $node=OzonTaxonomyNode::query()->where('ozon_account_id',$data['ozon_account_id'])->where('is_disabled',false)->whereNotNull('type_id')->where('type_id','!=','')->where('type_id','!=','0')->findOrFail($data['ozon_taxonomy_node_id']);
                     $data = array_merge($data, ['description_category_id'=>(string)$node->description_category_id,'description_category_name'=>$node->category_name,'type_id'=>(string)$node->type_id,'type_name'=>$node->type_name,'manual_taxonomy_unverified'=>false,'manual_warehouse'=>false]);
                 }
+                $warehouse = OzonWarehouse::query()->whereKey($data['ozon_warehouse_id'])->where('ozon_account_id',$data['ozon_account_id'])->where('is_api_confirmed',true)->where('is_active',true)->firstOrFail();
+                $previewRows=collect(app(OzonProductPreparationService::class)->prepareBatch($records,$data))->map(function(array $row) use ($warehouse): array {
+                    $prepared=$row['preview'];
+                    return ['product_id'=>(int)$prepared->product->getKey(),'snapshot'=>[...$prepared->snapshot,'warehouse_id'=>(int)$warehouse->getKey(),'warehouse_name'=>(string)$warehouse->name],...$prepared->validation->toArray()];
+                })->values()->all();
                 $this->preparationSettings=$data;
-                $this->previewRows=collect(app(OzonProductPreparationService::class)->prepareBatch($records,$data))->map(fn(array $row)=>['product_id'=>$row['preview']->product->id,'snapshot'=>$row['preview']->snapshot,...$row['preview']->validation->toArray()])->all();
-                Notification::make()->title('Dry-run готов')->body('Данные не сохранены и не отправлены в Ozon.')->success()->send();
-            })->modalSubmitActionLabel('Выполнить dry-run')->deselectRecordsAfterCompletion()]);
+                $this->previewRows=$previewRows;
+                Notification::make()->title('Dry-run готов')->body('Dry-run выполнен локально. Данные в Ozon не отправлялись.')->success()->send();
+        } catch (Throwable $exception) {
+            report($exception);
+            $this->preparationSettings=[];
+            $this->previewRows=[];
+            Notification::make()->title('Dry-run не выполнен')->body('Не удалось подготовить локальный preview. Проверьте выбранные данные и повторите попытку.')->danger()->send();
+        }
     }
 
-    protected function getHeaderActions(): array { return [Action::make('savePrepared')->label('Сохранить подготовленные товары')->visible(fn()=>count($this->previewRows)>0)->requiresConfirmation()->modalDescription('Данные сохранятся только локально и не будут отправлены в Ozon.')->action(function(): void { $saved=0; foreach($this->previewRows as $row){ $prepared=new OzonPreparedProduct(Product::query()->findOrFail($row['product_id']),$row['snapshot'],new OzonValidationResult($row['errors'],$row['warnings'])); if(app(OzonProductPreparationService::class)->save($prepared,$this->preparationSettings)) $saved++; } Notification::make()->title('Сохранено локально: '.$saved)->success()->send(); $this->previewRows=[]; })]; }
+    protected function getHeaderActions(): array { return [
+        Action::make('savePrepared')->label('Сохранить подготовленные товары')->visible(fn()=>count($this->previewRows)>0)->requiresConfirmation()->modalDescription('Данные сохранятся только локально и не будут отправлены в Ozon.')->action(function(): void { $saved=0; foreach($this->previewRows as $row){ $prepared=new OzonPreparedProduct(Product::query()->findOrFail($row['product_id']),$row['snapshot'],new OzonValidationResult($row['errors'],$row['warnings'])); if(app(OzonProductPreparationService::class)->save($prepared,$this->preparationSettings)) $saved++; } Notification::make()->title('Сохранено локально: '.$saved)->success()->send(); $this->previewRows=[]; }),
+        Action::make('returnToPreparation')->label('Вернуться к настройкам')->visible(fn()=>count($this->previewRows)>0)->action(fn()=> $this->previewRows=[]),
+        Action::make('cancelPreparation')->label('Отмена')->color('gray')->visible(fn()=>count($this->previewRows)>0)->action(function(): void { $this->previewRows=[]; $this->preparationSettings=[]; $this->selectedTableRecords=[]; }),
+    ]; }
     public function batchSummary(): array { $selected=count($this->previewRows); $prepared=collect($this->previewRows)->where('is_ready',true)->count(); $warnings=collect($this->previewRows)->filter(fn($row)=>$row['is_ready']&&$row['has_warnings'])->count(); return ['selected'=>$selected,'prepared'=>$prepared,'warnings'=>$warnings,'skipped'=>$selected-$prepared]; }
     private function preparationForm(): array { return [
         Select::make('ozon_account_id')->label('Аккаунт Ozon')->options(fn()=>OzonAccount::query()->where('is_active',true)->pluck('name','id'))->live()->required(),
