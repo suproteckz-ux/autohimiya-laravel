@@ -73,6 +73,7 @@ class OzonProductExportPage extends Page implements HasTable
                 })->values()->all();
                 $this->preparationSettings=$data;
                 $this->previewRows=$previewRows;
+                $this->forceRender();
                 Notification::make()->title('Dry-run готов')->body('Dry-run выполнен локально. Данные в Ozon не отправлялись.')->success()->send();
         } catch (Throwable $exception) {
             report($exception);

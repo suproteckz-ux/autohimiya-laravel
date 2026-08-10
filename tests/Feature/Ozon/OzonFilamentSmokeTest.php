@@ -96,6 +96,8 @@ class OzonFilamentSmokeTest extends TestCase
             ->assertSee('Отмена');
 
         $rows=$component->get('previewRows');
+        $this->assertArrayHasKey('html',$component->effects,'Livewire effects: '.json_encode(array_keys($component->effects)));
+        $this->assertArrayNotHasKey('partials',$component->effects,'The dry-run response must force a full component render so preview outside the table partial reaches the browser.');
         $settings=$component->get('preparationSettings');
         $this->assertCount(1,$rows);
         $this->assertSame($product->id,$rows[0]['product_id']);
