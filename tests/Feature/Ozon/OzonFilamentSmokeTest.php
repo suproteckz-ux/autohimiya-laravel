@@ -2,12 +2,15 @@
 
 namespace Tests\Feature\Ozon;
 
+use App\Enums\OzonProductStatus;
 use App\Filament\Pages\OzonProductExportPage;
 use App\Models\OzonAccount;
 use App\Models\OzonTaxonomyNode;
 use App\Models\OzonWarehouse;
+use App\Models\OzonProduct;
 use App\Models\Category;
 use App\Models\Product;
+use App\Models\ProductAttribute;
 use App\Models\User;
 use App\Services\Ozon\OzonProductPreparationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -84,12 +87,16 @@ class OzonFilamentSmokeTest extends TestCase
             ->assertHasNoErrors()
             ->assertNotified('Dry-run готов')
             ->assertSee('Dry-run выполнен локально. Данные в Ozon не отправлялись.')
+            ->assertSee('Готово к сохранению: 1')
+            ->assertSee('С предупреждениями: 0')
+            ->assertSee('С ошибками: 0')
             ->assertSee($warehouse->name)
             ->assertSee('Сохранить подготовленные товары')
             ->assertSee('Вернуться к настройкам')
             ->assertSee('Отмена');
 
         $rows=$component->get('previewRows');
+        $settings=$component->get('preparationSettings');
         $this->assertCount(1,$rows);
         $this->assertSame($product->id,$rows[0]['product_id']);
         $this->assertSame($warehouse->name,$rows[0]['snapshot']['warehouse_name']);
@@ -99,6 +106,41 @@ class OzonFilamentSmokeTest extends TestCase
         $this->assertDatabaseCount('ozon_products',0);
         $this->assertDatabaseCount('ozon_operations',0);
         $this->assertDatabaseCount('automation_runs',0);
+
+        $component->call('savePreparedProducts')->assertNotified('Товар подготовлен и сохранён локально.')->assertSet('previewRows',[])->assertSet('selectedTableRecords',[]);
+        $this->assertDatabaseCount('ozon_products',1);
+        $saved=OzonProduct::query()->sole();
+        $this->assertSame(OzonProductStatus::Ready,$saved->status);
+        $this->assertSame($product->sku,$saved->offer_id);
+        $this->assertNull($saved->ozon_product_id);
+        $this->assertNull($saved->ozon_sku);
+        $this->assertNull($saved->ozon_task_id);
+        $this->assertNotEmpty($saved->prepared_payload);
+        $this->assertSame($account->id,$saved->ozon_account_id);
+        $this->assertSame($product->id,$saved->product_id);
+        $this->assertSame($category->id,$saved->site_category_id);
+        $this->assertSame($warehouse->id,$saved->ozon_warehouse_id);
+        $this->assertSame($node->description_category_id,$saved->description_category_id);
+        $this->assertSame($node->category_name,$saved->description_category_name);
+        $this->assertSame($node->type_id,$saved->type_id);
+        $this->assertSame($node->type_name,$saved->type_name);
+        $this->assertSame($product->name,$saved->prepared_name);
+        $this->assertNotEmpty($saved->prepared_description);
+        $this->assertCount(2,$saved->prepared_images);
+        $this->assertCount(1,$saved->prepared_attributes);
+        $this->assertTrue($saved->price_sync_enabled);
+        $this->assertTrue($saved->stock_sync_enabled);
+        $this->assertSame('1.0000',$saved->price_multiplier);
+        $this->assertSame('none',$saved->rounding_rule);
+        $this->assertSame('3402',$saved->tnved_code);
+        $this->assertSame('1000.00',$saved->calculated_price);
+        $this->assertSame(5,$saved->calculated_stock);
+        $this->assertSame($before,$product->fresh()->only(array_keys($before)));
+        $this->get('/admin/ozon-products')->assertOk()->assertSee($product->name)->assertSee($product->sku);
+
+        $component->set('previewRows',$rows)->set('preparationSettings',$settings)->call('savePreparedProducts');
+        $this->assertDatabaseCount('ozon_products',1);
+        $this->assertSame($product->sku,$saved->fresh()->offer_id);
         Http::assertNothingSent();
     }
 
@@ -110,9 +152,25 @@ class OzonFilamentSmokeTest extends TestCase
         ]);
         unset($manual['ozon_taxonomy_node_id']);
 
-        Livewire::test(OzonProductExportPage::class)->filterTable('category',$category->id)->callTableBulkAction('prepare',[$product],$manual)->assertNotified('Dry-run готов');
+        $manualComponent=Livewire::test(OzonProductExportPage::class)->filterTable('category',$category->id)->callTableBulkAction('prepare',[$product],$manual)->assertNotified('Dry-run готов');
+        $manualComponent->call('savePreparedProducts')->assertNotified('Товар подготовлен и сохранён локально.');
+        $this->assertSame(OzonProductStatus::Draft,OzonProduct::query()->sole()->status);
         $this->mock(OzonProductPreparationService::class)->shouldReceive('prepareBatch')->once()->andThrow(new \RuntimeException('internal detail must not reach the user'));
         Livewire::test(OzonProductExportPage::class)->filterTable('category',$category->id)->callTableBulkAction('prepare',[$product],$manual)->assertNotified('Dry-run не выполнен')->assertSet('previewRows',[])->assertDontSee('internal detail must not reach the user');
+        Http::assertNothingSent();
+    }
+
+    public function test_critical_preview_is_not_saved(): void
+    {
+        [$product,$account,$warehouse,$node,$category]=$this->dryRunFixture();
+        $component=Livewire::test(OzonProductExportPage::class)->filterTable('category',$category->id)->callTableBulkAction('prepare',[$product],$this->taxonomyActionData($account,$warehouse,$node));
+        $rows=$component->get('previewRows');
+        $rows[0]['errors']=['Критическая ошибка'];
+        $rows[0]['is_ready']=false;
+        $component->set('previewRows',$rows)->call('savePreparedProducts')->assertNotified('Товар подготовлен и сохранён локально.');
+
+        $this->assertDatabaseCount('ozon_products',0);
+        $this->assertSame('Тестовый товар',$product->fresh()->name);
         Http::assertNothingSent();
     }
 
@@ -124,12 +182,13 @@ class OzonFilamentSmokeTest extends TestCase
         $warehouse=OzonWarehouse::factory()->create(['ozon_account_id'=>$account->id,'name'=>'API склад','is_active'=>true,'is_api_confirmed'=>true]);
         $node=OzonTaxonomyNode::query()->create(['ozon_account_id'=>$account->id,'description_category_id'=>'17000000','category_name'=>'Присадки в масло','type_id'=>'17001','type_name'=>'Присадка в моторное масло','is_disabled'=>false,'synced_at'=>now()]);
         $product=Product::query()->create(['name'=>'Тестовый товар','slug'=>'ozon-dry-product','sku'=>'OZ-DRY-1','category_id'=>$category->id,'price'=>'1000.00','quantity'=>5,'description'=>'Описание','primary_image'=>'https://www.xn--80aesatk1az7g.kz/storage/products/oz-dry.jpg']);
-        DB::table('product_images')->insert(['product_id'=>$product->id,'path'=>'https://www.xn--80aesatk1az7g.kz/storage/products/oz-dry.jpg','role'=>'primary','is_primary'=>true,'sort_order'=>0,'created_at'=>now(),'updated_at'=>now()]);
+        DB::table('product_images')->insert([['product_id'=>$product->id,'path'=>'https://www.xn--80aesatk1az7g.kz/storage/products/oz-dry.jpg','role'=>'primary','is_primary'=>true,'sort_order'=>0,'created_at'=>now(),'updated_at'=>now()],['product_id'=>$product->id,'path'=>'https://www.xn--80aesatk1az7g.kz/storage/products/oz-dry-2.jpg','role'=>'gallery','is_primary'=>false,'sort_order'=>1,'created_at'=>now(),'updated_at'=>now()]]);
+        ProductAttribute::query()->create(['product_id'=>$product->id,'name'=>'Объём','value'=>'100','unit'=>'мл']);
         return [$product,$account,$warehouse,$node,$category];
     }
 
     private function taxonomyActionData(OzonAccount $account,OzonWarehouse $warehouse,?OzonTaxonomyNode $node): array
     {
-        return ['ozon_account_id'=>$account->id,'taxonomy_mode'=>'taxonomy','ozon_taxonomy_node_id'=>$node?->id,'ozon_warehouse_id'=>$warehouse->id,'price_multiplier'=>1,'rounding_rule'=>'none','price_sync_enabled'=>true,'stock_sync_enabled'=>true];
+        return ['ozon_account_id'=>$account->id,'taxonomy_mode'=>'taxonomy','ozon_taxonomy_node_id'=>$node?->id,'ozon_warehouse_id'=>$warehouse->id,'price_multiplier'=>1,'rounding_rule'=>'none','tnved_code'=>'3402','price_sync_enabled'=>true,'stock_sync_enabled'=>true];
     }
 }

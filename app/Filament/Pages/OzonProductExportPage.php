@@ -13,7 +13,6 @@ use App\Services\Ozon\OzonProductPreparationService;
 use App\Services\Ozon\OzonProductSelectionService;
 use App\Support\AdminCategoryOptions;
 use BackedEnum;
-use Filament\Actions\Action;
 use Filament\Actions\BulkAction;
 use Filament\Forms\Components\Checkbox;
 use Filament\Forms\Components\Select;
@@ -83,12 +82,12 @@ class OzonProductExportPage extends Page implements HasTable
         }
     }
 
-    protected function getHeaderActions(): array { return [
-        Action::make('savePrepared')->label('Сохранить подготовленные товары')->visible(fn()=>count($this->previewRows)>0)->requiresConfirmation()->modalDescription('Данные сохранятся только локально и не будут отправлены в Ozon.')->action(function(): void { $saved=0; foreach($this->previewRows as $row){ $prepared=new OzonPreparedProduct(Product::query()->findOrFail($row['product_id']),$row['snapshot'],new OzonValidationResult($row['errors'],$row['warnings'])); if(app(OzonProductPreparationService::class)->save($prepared,$this->preparationSettings)) $saved++; } Notification::make()->title('Сохранено локально: '.$saved)->success()->send(); $this->previewRows=[]; }),
-        Action::make('returnToPreparation')->label('Вернуться к настройкам')->visible(fn()=>count($this->previewRows)>0)->action(fn()=> $this->previewRows=[]),
-        Action::make('cancelPreparation')->label('Отмена')->color('gray')->visible(fn()=>count($this->previewRows)>0)->action(function(): void { $this->previewRows=[]; $this->preparationSettings=[]; $this->selectedTableRecords=[]; }),
-    ]; }
-    public function batchSummary(): array { $selected=count($this->previewRows); $prepared=collect($this->previewRows)->where('is_ready',true)->count(); $warnings=collect($this->previewRows)->filter(fn($row)=>$row['is_ready']&&$row['has_warnings'])->count(); return ['selected'=>$selected,'prepared'=>$prepared,'warnings'=>$warnings,'skipped'=>$selected-$prepared]; }
+    protected function getHeaderActions(): array { return []; }
+    public function savePreparedProducts(): void { foreach($this->previewRows as $row){ $prepared=new OzonPreparedProduct(Product::query()->findOrFail($row['product_id']),$row['snapshot'],new OzonValidationResult($row['errors'],$row['warnings'])); app(OzonProductPreparationService::class)->save($prepared,$this->preparationSettings); } $this->clearPreparationState(); Notification::make()->title('Товар подготовлен и сохранён локально.')->success()->send(); }
+    public function returnToPreparation(): void { $this->previewRows=[]; }
+    public function cancelPreparation(): void { $this->clearPreparationState(); }
+    private function clearPreparationState(): void { $this->previewRows=[]; $this->preparationSettings=[]; $this->selectedTableRecords=[]; $this->deselectAllTableRecords(); $this->resetTable(); }
+    public function batchSummary(): array { $rows=collect($this->previewRows); $warnings=$rows->filter(fn($row)=>$row['is_ready']&&$row['has_warnings'])->count(); $ready=$rows->filter(fn($row)=>$row['is_ready']&&!$row['has_warnings'])->count(); $errors=$rows->where('is_ready',false)->count(); return ['selected'=>$rows->count(),'prepared'=>$ready,'warnings'=>$warnings,'errors'=>$errors,'skipped'=>$errors]; }
     private function preparationForm(): array { return [
         Select::make('ozon_account_id')->label('Аккаунт Ozon')->options(fn()=>OzonAccount::query()->where('is_active',true)->pluck('name','id'))->live()->required(),
         Select::make('taxonomy_mode')->label('Режим category/type')->options(['taxonomy'=>'Выбрать из Ozon','manual'=>'Ввести вручную'])->default('taxonomy')->live()->required(),
