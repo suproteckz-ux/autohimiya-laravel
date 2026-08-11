@@ -10,7 +10,8 @@ use Throwable;
 
 class DatabaseStorageAuditCommand extends Command
 {
-    protected $signature = 'db:storage-audit';
+    protected $signature = 'db:storage-audit
+        {--deep : Run expensive payload length and duplicate scans (not recommended on shared production)}';
 
     protected $description = 'Read-only database storage, growth, payload, duplicate, and tablespace audit';
 
@@ -41,8 +42,14 @@ class DatabaseStorageAuditCommand extends Command
             $this->growthRows($connection),
         );
 
-        $this->section('C. JSON/TEXT/LONGTEXT usage');
-        $this->table(['table', 'column', 'avg_bytes', 'max_bytes', 'total_mb'], $this->largeColumnStats($connection, $database));
+        if ((bool) $this->option('deep')) {
+            $this->components->warn('DEEP MODE performs full payload scans and is not recommended on shared production.');
+            $this->section('C. JSON/TEXT/LONGTEXT usage (deep)');
+            $this->table(['table', 'column', 'avg_bytes', 'max_bytes', 'total_mb'], $this->largeColumnStats($connection, $database));
+        } else {
+            $this->section('C. JSON/TEXT/LONGTEXT usage');
+            $this->line('Skipped in lightweight mode. Use --deep only on a safe database copy.');
+        }
 
         $this->section('D. Ozon taxonomy duplicates');
         $this->taxonomyDuplicates($connection);
@@ -54,7 +61,7 @@ class DatabaseStorageAuditCommand extends Command
         $this->tablespaceMetadata($connection, $database);
 
         $this->section('G. ozon_operations distribution');
-        $this->ozonOperationStats($connection);
+        $this->ozonOperationStats($connection, (bool) $this->option('deep'));
 
         $this->newLine();
         $this->components->info('Audit completed. No database data or schema was changed.');
@@ -214,7 +221,7 @@ class DatabaseStorageAuditCommand extends Command
         $this->line('tablespace metadata unavailable due to database permissions');
     }
 
-    private function ozonOperationStats(ConnectionInterface $connection): void
+    private function ozonOperationStats(ConnectionInterface $connection, bool $deep): void
     {
         if (! Schema::hasTable('ozon_operations')) {
             $this->line('ozon_operations: table missing');
@@ -223,6 +230,12 @@ class DatabaseStorageAuditCommand extends Command
 
         $this->table(['operation_type', 'status', 'count'], DB::table('ozon_operations')->select('operation_type', 'status')->selectRaw('COUNT(*) count')
             ->groupBy('operation_type', 'status')->orderByDesc('count')->get()->map(fn (object $row) => (array) $row)->all());
+
+        if (! $deep) {
+            $this->line('Payload length and duplicate scans skipped in lightweight mode.');
+
+            return;
+        }
 
         foreach (['request_payload', 'response_payload', 'error_message'] as $column) {
             if (! Schema::hasColumn('ozon_operations', $column)) {

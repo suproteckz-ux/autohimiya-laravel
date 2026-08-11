@@ -42,7 +42,6 @@ class OzonTaxonomyService
         }
 
         $saved = 0;
-        $dictionaryValuesLoaded = 0;
         $warnings = [];
 
         foreach ($response['result'] as $item) {
@@ -55,22 +54,6 @@ class OzonTaxonomyService
             }
 
             $dictionaryId = (string) ($item['dictionary_id'] ?? '');
-            $existing = OzonTaxonomyAttribute::query()
-                ->where('ozon_taxonomy_node_id', $node->id)
-                ->where('attribute_id', $attributeId)
-                ->first();
-            $values = $existing?->values_payload;
-
-            if ((int) $dictionaryId > 0) {
-                try {
-                    $values = $this->loadValues($node, $attributeId, $run);
-                    $dictionaryValuesLoaded += count($values);
-                } catch (Throwable $exception) {
-                    $warnings[] = "Type {$node->type_id}, attribute {$attributeId}: dictionary values were not loaded ({$this->safeError($exception)}).";
-                }
-            } else {
-                $values = null;
-            }
 
             OzonTaxonomyAttribute::query()->updateOrCreate(
                 ['ozon_taxonomy_node_id' => $node->id, 'attribute_id' => $attributeId],
@@ -80,8 +63,8 @@ class OzonTaxonomyService
                     'dictionary_id' => $dictionaryId,
                     'is_required' => (bool) ($item['is_required'] ?? false),
                     'is_collection' => (bool) ($item['is_collection'] ?? false),
-                    'values_payload' => $values,
-                    'raw_payload' => $item,
+                    'values_payload' => null,
+                    'raw_payload' => null,
                     'synced_at' => now(),
                 ],
             );
@@ -92,7 +75,7 @@ class OzonTaxonomyService
             'successful' => true,
             'processed_items' => $saved,
             'attributes_saved' => $saved,
-            'dictionary_values_loaded' => $dictionaryValuesLoaded,
+            'dictionary_values_loaded' => 0,
             'warnings' => $warnings,
         ];
     }
@@ -190,33 +173,6 @@ class OzonTaxonomyService
         return $stats;
     }
 
-    private function loadValues(OzonTaxonomyNode $node, string $attributeId, ?AutomationRun $run): array
-    {
-        $last = 0;
-        $values = [];
-
-        do {
-            $response = $this->client->post($node->account, '/v1/description-category/attribute/values', [
-                'description_category_id' => (int) $node->description_category_id,
-                'type_id' => (int) $node->type_id,
-                'attribute_id' => (int) $attributeId,
-                'language' => 'DEFAULT',
-                'limit' => 5000,
-                'last_value_id' => $last,
-            ], OzonOperationType::TaxonomySync, $run);
-
-            if (! array_key_exists('result', $response) || ! is_array($response['result'])) {
-                throw new \UnexpectedValueException('Ozon attribute values response has invalid schema.');
-            }
-
-            $items = $response['result'];
-            $values = array_merge($values, $items);
-            $last = (int) ($response['last_value_id'] ?? 0);
-        } while ($last > 0 && $items !== []);
-
-        return $values;
-    }
-
     private function storeNodes(OzonAccount $account, array $items, ?OzonTaxonomyNode $parent): int
     {
         $count = 0;
@@ -264,5 +220,13 @@ class OzonTaxonomyService
             ->whereNotNull('type_id')
             ->where('type_id', '!=', '')
             ->where('type_id', '!=', '0');
+    }
+
+    public function nodesAreFresh(OzonAccount $account, int $hours = 24): bool
+    {
+        return OzonTaxonomyNode::query()
+            ->where('ozon_account_id', $account->id)
+            ->where('synced_at', '>=', now()->subHours(max(1, $hours)))
+            ->exists();
     }
 }

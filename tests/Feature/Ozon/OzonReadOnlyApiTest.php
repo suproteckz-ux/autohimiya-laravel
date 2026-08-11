@@ -152,28 +152,30 @@ class OzonReadOnlyApiTest extends TestCase
         $this->expectException(UnexpectedValueException::class); app(OzonWarehouseService::class)->sync($account);
     }
 
-    public function test_taxonomy_is_idempotent_and_dictionary_values_are_cached(): void
+    public function test_taxonomy_is_idempotent_and_heavy_attribute_payloads_are_not_cached(): void
     {
         $account=OzonAccount::factory()->create();
         $tree=['result'=>[['description_category_id'=>1,'category_name'=>'Присадки в масло','disabled'=>false,'children'=>[['type_id'=>2,'type_name'=>'Присадка в моторное масло','disabled'=>false,'children'=>[]]]]]];
-        Http::fakeSequence()->push($tree,200)->push($tree,200)->push(['result'=>[['id'=>3,'name'=>'Бренд','dictionary_id'=>4,'is_required'=>true,'is_collection'=>false,'type'=>'String']]],200)->push(['result'=>[['id'=>5,'value'=>'Example']],'last_value_id'=>0],200);
+        Http::fakeSequence()->push($tree,200)->push($tree,200)->push(['result'=>[['id'=>3,'name'=>'Бренд','dictionary_id'=>4,'is_required'=>true,'is_collection'=>false,'type'=>'String','large_metadata'=>str_repeat('x',10000)]]],200);
         $service=app(OzonTaxonomyService::class); $service->syncTree($account); $service->syncTree($account); $node=OzonTaxonomyNode::query()->where('type_id','2')->firstOrFail(); $service->syncAttributes($node);
-        $this->assertSame(2,OzonTaxonomyNode::query()->count()); $this->assertSame('1',$node->description_category_id); $this->assertSame('Присадки в масло',$node->category_name); $this->assertSame('Присадка в моторное масло',$node->type_name); $this->assertSame('Example',$node->attributes()->first()->values_payload[0]['value']);
+        $attribute=$node->attributes()->firstOrFail();
+        $this->assertSame(2,OzonTaxonomyNode::query()->count()); $this->assertSame('1',$node->description_category_id); $this->assertSame('Присадки в масло',$node->category_name); $this->assertSame('Присадка в моторное масло',$node->type_name); $this->assertNull($attribute->values_payload); $this->assertNull($attribute->raw_payload);
         Http::assertSent(fn(Request $request)=>str_ends_with($request->url(),'/v1/description-category/tree')&&str_starts_with($request->body(),'{')&&$request['language']==='DEFAULT');
         Http::assertSent(fn(Request $request)=>str_ends_with($request->url(),'/v1/description-category/attribute')&&$request['description_category_id']===1&&$request['type_id']===2);
-        Http::assertSent(fn(Request $request)=>str_ends_with($request->url(),'/v1/description-category/attribute/values')&&$request['limit']===5000&&array_key_exists('last_value_id',$request->data()));
+        Http::assertNotSent(fn(Request $request)=>str_ends_with($request->url(),'/v1/description-category/attribute/values'));
     }
 
-    public function test_failed_attribute_value_page_preserves_previous_attribute_data(): void
+    public function test_attribute_refresh_removes_previous_heavy_cached_payloads(): void
     {
         $account=OzonAccount::factory()->create(); $node=OzonTaxonomyNode::query()->create(['ozon_account_id'=>$account->id,'description_category_id'=>'1','category_name'=>'Old','type_id'=>'2','type_name'=>'Old','synced_at'=>now()]);
         $attribute=OzonTaxonomyAttribute::query()->create(['ozon_taxonomy_node_id'=>$node->id,'attribute_id'=>'3','name'=>'Old','dictionary_id'=>'4','values_payload'=>[['id'=>1,'value'=>'Old']],'synced_at'=>now()]);
-        Http::fakeSequence()->push(['result'=>[['id'=>3,'name'=>'New','dictionary_id'=>4]]],200)->push(['message'=>'temporary'],503)->push(['message'=>'temporary'],503)->push(['message'=>'temporary'],503);
+        Http::fakeSequence()->push(['result'=>[['id'=>3,'name'=>'New','dictionary_id'=>4]]],200);
         $result=app(OzonTaxonomyService::class)->syncAttributes($node);
         $this->assertSame(1,$result['attributes_saved']);
-        $this->assertCount(1,$result['warnings']);
+        $this->assertCount(0,$result['warnings']);
         $this->assertSame('New',$attribute->refresh()->name);
-        $this->assertSame('Old',$attribute->values_payload[0]['value']);
+        $this->assertNull($attribute->values_payload);
+        $this->assertNull($attribute->raw_payload);
     }
 
     public function test_er5_type_node_receives_all_attributes_and_annotation_is_resolvable(): void
@@ -220,12 +222,11 @@ class OzonReadOnlyApiTest extends TestCase
         $this->assertDatabaseHas('ozon_taxonomy_attributes',['ozon_taxonomy_node_id'=>$second->id,'attribute_id'=>'31']);
     }
 
-    public function test_taxonomy_automation_loads_tree_types_and_attributes(): void
+    public function test_taxonomy_automation_loads_nodes_only(): void
     {
         $account=OzonAccount::factory()->create();
         Http::fakeSequence()
-            ->push(['result'=>[['description_category_id'=>10,'category_name'=>'Присадки в масло','children'=>[['type_id'=>20,'type_name'=>'Присадка в моторное масло','children'=>[]]]]]],200)
-            ->push(['result'=>[['id'=>30,'name'=>'Бренд','dictionary_id'=>0,'is_required'=>true,'is_collection'=>false,'type'=>'String']]],200);
+            ->push(['result'=>[['description_category_id'=>10,'category_name'=>'Присадки в масло','children'=>[['type_id'=>20,'type_name'=>'Присадка в моторное масло','children'=>[]]]]]],200);
         $run=app(AutomationRunService::class)->request(AutomationType::OzonTaxonomySync,AutomationRunSource::Admin,null,['ozon_account_id'=>$account->id])['run'];
 
         app(AutomationRunner::class)->runPending(runId:$run->id,limit:1);
@@ -235,47 +236,27 @@ class OzonReadOnlyApiTest extends TestCase
         $this->assertSame('10',$type->description_category_id);
         $this->assertSame('Присадки в масло',$type->category_name);
         $this->assertSame('Присадка в моторное масло',$type->type_name);
-        $this->assertDatabaseHas('ozon_taxonomy_attributes',['ozon_taxonomy_node_id'=>$type->id,'attribute_id'=>'30','name'=>'Бренд']);
+        $this->assertDatabaseCount('ozon_taxonomy_attributes',0);
+        Http::assertSentCount(1);
     }
 
-    public function test_taxonomy_batches_continue_without_starving_older_pending_types(): void
+    public function test_repeated_taxonomy_sync_skips_fresh_nodes_and_never_starts_full_attributes(): void
     {
         $account=OzonAccount::factory()->create();
-        $children=collect(range(1,25))->map(fn(int $id): array=>['type_id'=>1000+$id,'type_name'=>'Type '.$id,'disabled'=>false,'children'=>[]])->all();
-        Http::fake(function(Request $request) use($children) {
-            if(str_ends_with($request->url(),'/v1/description-category/tree')) return Http::response(['result'=>[['description_category_id'=>500,'category_name'=>'Category','children'=>$children]]],200);
-            if(str_ends_with($request->url(),'/v1/description-category/attribute')) return Http::response(['result'=>[['id'=>700,'name'=>'Аннотация','dictionary_id'=>0,'type'=>'String']]],200);
-            return Http::response(['message'=>'unexpected'],500);
-        });
+        Http::fake([OzonApiClient::BASE_URL.'/v1/description-category/tree'=>Http::response(['result'=>[['description_category_id'=>500,'category_name'=>'Category','children'=>[['type_id'=>1001,'type_name'=>'Type 1','children'=>[]]]]]],200)]);
         $runs=app(AutomationRunService::class);
-        $taxonomy=$runs->request(AutomationType::OzonTaxonomySync,AutomationRunSource::Admin,null,['ozon_account_id'=>$account->id])['run'];
-        $health=$runs->request(AutomationType::AutomationHealth,AutomationRunSource::Admin)['run'];
-        $export=$runs->request(AutomationType::OzonProductExport,AutomationRunSource::Admin,null,['ozon_product_id'=>999999])['run'];
+        $first=$runs->request(AutomationType::OzonTaxonomySync,AutomationRunSource::Admin,null,['ozon_account_id'=>$account->id])['run'];
 
-        app(AutomationRunner::class)->runPending(runId:$taxonomy->id,limit:1);
+        app(AutomationRunner::class)->runPending(runId:$first->id,limit:1);
+        $second=$runs->request(AutomationType::OzonTaxonomySync,AutomationRunSource::Admin,null,['ozon_account_id'=>$account->id])['run'];
+        app(AutomationRunner::class)->runPending(runId:$second->id,limit:1);
 
-        $taxonomy->refresh();
-        $this->assertSame('completed',$taxonomy->status);
-        $this->assertSame(20,$taxonomy->context['processed_nodes']);
-        $this->assertSame(20,OzonTaxonomyAttribute::query()->count());
-        $continuation=AutomationRun::query()->where('type',AutomationType::OzonTaxonomySync->value)->where('status','pending')->sole();
-        $this->assertSame($taxonomy->id,$continuation->context['continued_from_run_id']);
-        $this->assertSame(20,$continuation->context['last_processed_node_id'] > 0 ? $continuation->context['processed_nodes'] : 0);
-
-        app(AutomationRunner::class)->runPending(limit:1);
-        $this->assertNotSame('pending',$health->refresh()->status);
-        $this->assertSame('pending',$export->refresh()->status);
-
-        app(AutomationRunner::class)->runPending(limit:1);
-        $this->assertSame('failed',$export->refresh()->status);
-        $this->assertSame('pending',$continuation->refresh()->status);
-
-        app(AutomationRunner::class)->runPending(limit:1);
-        $this->assertSame('completed',$continuation->refresh()->status);
-        $this->assertSame(25,$continuation->context['processed_nodes']);
-        $this->assertSame(25,OzonTaxonomyAttribute::query()->count());
-        $this->assertDatabaseCount('automation_runs',4);
-        Http::assertSentCount(26);
+        $this->assertSame('completed',$first->refresh()->status);
+        $this->assertSame('completed',$second->refresh()->status);
+        $this->assertDatabaseCount('ozon_taxonomy_nodes',2);
+        $this->assertDatabaseCount('ozon_taxonomy_attributes',0);
+        $this->assertDatabaseCount('automation_runs',2);
+        Http::assertSentCount(1);
     }
 
     public function test_taxonomy_continuation_is_duplicate_protected(): void
