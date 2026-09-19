@@ -16,14 +16,16 @@ class KaspiOrdersSyncCommand extends Command
 
     protected $description = 'Sync Kaspi Partner API orders into the local reservation engine';
 
-    public function __construct(private readonly KaspiOrdersSyncService $service) {
+    public function __construct(private readonly KaspiOrdersSyncService $service)
+    {
         parent::__construct();
     }
 
     public function handle(): int
     {
         $mode = config('services.kaspi.orders_mode', 'observe');
-        $this->info("Kaspi orders sync — mode: {$mode}");
+        $lookback = config('services.kaspi.orders_lookback_days', 14);
+        $this->info("Kaspi orders sync — mode: {$mode}, lookback: {$lookback}d");
 
         if ($this->option('dry-run')) {
             $this->warn('DRY RUN — no changes will be written.');
@@ -31,10 +33,10 @@ class KaspiOrdersSyncCommand extends Command
 
         $options = [
             'dry_run' => (bool) $this->option('dry-run'),
-            'limit' => $this->option('limit') ? (int) $this->option('limit') : 0,
-            'from' => $this->option('from'),
-            'to' => $this->option('to'),
-            'order' => $this->option('order'),
+            'limit'   => $this->option('limit') ? (int) $this->option('limit') : 0,
+            'from'    => $this->option('from'),
+            'to'      => $this->option('to'),
+            'order'   => $this->option('order'),
         ];
 
         $result = $this->service->sync($options);
@@ -53,14 +55,17 @@ class KaspiOrdersSyncCommand extends Command
         $this->table(
             ['Metric', 'Value'],
             [
-                ['Mode', $result['mode'] ?? $mode],
-                ['Dry run', ($result['dry_run'] ?? false) ? 'yes' : 'no'],
-                ['Processed', $result['processed'] ?? 0],
-                ['Created', $result['created'] ?? 0],
-                ['Updated', $result['updated'] ?? 0],
-                ['SKU matched', $result['sku_matched'] ?? 0],
-                ['SKU unmatched', $result['sku_unmatched'] ?? 0],
-                ['Errors', $result['errors'] ?? 0],
+                ['Mode',               $result['mode'] ?? $mode],
+                ['Dry run',            ($result['dry_run'] ?? false) ? 'yes' : 'no'],
+                ['Orders received',    $result['processed'] ?? 0],
+                ['Pages',              $result['pages'] ?? 0],
+                ['Entries',            $result['entries'] ?? 0],
+                ['Created',            $result['created'] ?? 0],
+                ['Updated',            $result['updated'] ?? 0],
+                ['SKU matched',        $result['sku_matched'] ?? 0],
+                ['SKU unmatched',      $result['sku_unmatched'] ?? 0],
+                ['Handoff candidates', $result['handoff_candidates'] ?? 0],
+                ['Errors',             $result['errors'] ?? 0],
             ]
         );
 
