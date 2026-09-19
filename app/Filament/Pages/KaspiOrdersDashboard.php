@@ -52,7 +52,7 @@ class KaspiOrdersDashboard extends Page
             'pending_paloma_count' => $stats['orders_count'],
             'pending_paloma_qty' => $stats['items_qty'],
             'baseline_count' => KaspiOrder::where('baseline_ignored', true)->count(),
-            'last_paloma_sync' => $lastPalomaSync?->finished_at,
+            'last_paloma_sync' => $lastPalomaSync?->started_at,
             'confirm_safe' => $confirmSafe,
             'confirm_block_reason' => $confirmBlockReason,
         ];
