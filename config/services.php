@@ -36,5 +36,14 @@ return [
         'image_connect_timeout' => (int) env('KASPI_IMAGE_CONNECT_TIMEOUT', 5),
         'image_timeout' => (int) env('KASPI_IMAGE_TIMEOUT', 15),
         'image_max_bytes' => (int) env('KASPI_IMAGE_MAX_BYTES', 5242880),
+
+        // Partner API — orders & stock reservation
+        'partner_api_url' => env('KASPI_PARTNER_API_URL', 'https://kaspi.kz/shop/api/v2'),
+        // Token is intentionally not logged anywhere
+        'partner_api_token' => env('KASPI_PARTNER_API_TOKEN'),
+        'orders_mode' => in_array(env('KASPI_ORDERS_MODE', 'observe'), ['observe', 'active'], true)
+            ? env('KASPI_ORDERS_MODE', 'observe')
+            : 'observe',
+        'handoff_by_courier_date' => (bool) env('KASPI_HANDOFF_BY_COURIER_DATE', false),
     ],
 ];
