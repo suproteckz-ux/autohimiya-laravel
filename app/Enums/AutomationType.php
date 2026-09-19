@@ -14,6 +14,7 @@ enum AutomationType: string
     case OzonTaxonomySync = 'ozon_taxonomy_sync';
     case OzonProductExport = 'ozon_product_export';
     case OzonProductExportStatus = 'ozon_product_export_status';
+    case KaspiOrdersSync = 'kaspi_orders_sync';
 
     public function commandName(): string
     {
@@ -28,6 +29,7 @@ enum AutomationType: string
             self::OzonTaxonomySync => 'ozon:taxonomy-sync',
             self::OzonProductExport => 'ozon:product-export',
             self::OzonProductExportStatus => 'ozon:product-export-status',
+            self::KaspiOrdersSync => 'kaspi:orders-sync',
         };
     }
 
@@ -49,6 +51,7 @@ enum AutomationType: string
             self::OzonTaxonomySync => 'Загрузка taxonomy Ozon',
             self::OzonProductExport => 'Отправка товара в Ozon',
             self::OzonProductExportStatus => 'Проверка статуса товара Ozon',
+            self::KaspiOrdersSync => 'Синхронизация заказов Kaspi',
         };
     }
 
@@ -72,6 +75,7 @@ enum AutomationType: string
                 'delay_ms' => 3000,
             ],
             self::AutomationHealth, self::CatalogQualityReport, self::OzonConnectionCheck, self::OzonWarehouseSync, self::OzonTaxonomySync, self::OzonProductExport, self::OzonProductExportStatus => [],
+            self::KaspiOrdersSync => ['dry_run' => false],
         };
     }
 
@@ -88,6 +92,7 @@ enum AutomationType: string
             'ozon:taxonomy-sync' => self::OzonTaxonomySync,
             'ozon:product-export' => self::OzonProductExport,
             'ozon:product-export-status' => self::OzonProductExportStatus,
+            'kaspi:orders-sync' => self::KaspiOrdersSync,
             default => null,
         };
     }

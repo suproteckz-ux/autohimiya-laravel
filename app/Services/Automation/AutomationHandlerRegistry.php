@@ -14,6 +14,7 @@ use App\Services\Automation\Handlers\OzonTaxonomySyncHandler;
 use App\Services\Automation\Handlers\OzonWarehouseSyncHandler;
 use App\Services\Automation\Handlers\OzonProductExportHandler;
 use App\Services\Automation\Handlers\OzonProductExportStatusHandler;
+use App\Services\Automation\Handlers\KaspiOrdersSyncHandler;
 use InvalidArgumentException;
 
 class AutomationHandlerRegistry
@@ -34,6 +35,7 @@ class AutomationHandlerRegistry
             AutomationType::OzonTaxonomySync->value => OzonTaxonomySyncHandler::class,
             AutomationType::OzonProductExport->value => OzonProductExportHandler::class,
             AutomationType::OzonProductExportStatus->value => OzonProductExportStatusHandler::class,
+            AutomationType::KaspiOrdersSync->value => KaspiOrdersSyncHandler::class,
         ];
     }
 
