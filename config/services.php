@@ -45,5 +45,6 @@ return [
             ? env('KASPI_ORDERS_MODE', 'observe')
             : 'observe',
         'handoff_by_courier_date' => (bool) env('KASPI_HANDOFF_BY_COURIER_DATE', false),
+        'orders_lookback_days' => (int) env('KASPI_ORDERS_LOOKBACK_DAYS', 14),
     ],
 ];
