@@ -19,17 +19,21 @@ class PalomaStockConfirmationService
      */
     public function assertCanConfirm(): void
     {
+        $stats = $this->pendingStats();
+        if ($stats['orders_count'] === 0) {
+            throw new RuntimeException('Нет заказов, ожидающих подтверждения Paloma (pending = 0). Подтверждение не требуется.');
+        }
+
         $latestSuccessful = $this->latestSuccessfulPalomaSyncLog();
 
         if (! $latestSuccessful) {
-            throw new RuntimeException('Нет успешного Paloma sync. Выполните синхронизацию остатков перед подтверждением.');
+            throw new RuntimeException('Нет завершённого Paloma sync. Выполните синхронизацию остатков перед подтверждением.');
         }
 
-        // Warn if the last sync was more than 2 hours ago (very stale)
-        if ($latestSuccessful->finished_at && $latestSuccessful->finished_at->lt(now()->subHours(2))) {
+        if ($latestSuccessful->started_at && $latestSuccessful->started_at->lt(now()->subHours(2))) {
             throw new RuntimeException(
-                'Последний успешный Paloma sync устарел ('
-                . $latestSuccessful->finished_at->diffForHumans()
+                'Последний Paloma sync устарел ('
+                . $latestSuccessful->started_at->diffForHumans()
                 . '). Выполните обновлённую синхронизацию.'
             );
         }
@@ -119,8 +123,8 @@ class PalomaStockConfirmationService
     {
         return SyncLog::query()
             ->where('source', 'paloma')
-            ->where('status', 'success')
-            ->latest('finished_at')
+            ->whereIn('status', ['success', 'warning'])
+            ->latest('started_at')
             ->first();
     }
 }
