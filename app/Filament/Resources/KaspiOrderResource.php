@@ -5,6 +5,7 @@ namespace App\Filament\Resources;
 use App\Enums\KaspiOrderInternalStatus;
 use App\Filament\Resources\KaspiOrderResource\Pages;
 use App\Models\KaspiOrder;
+use Filament\Actions\ViewAction;
 use Filament\Infolists\Components\TextEntry;
 use Filament\Resources\Resource;
 use Filament\Schemas\Components\Grid;
@@ -162,7 +163,7 @@ class KaspiOrderResource extends Resource
                     ->query(fn ($query) => $query->whereNotNull('courier_transmission_date')->whereNull('handoff_at')),
             ])
             ->actions([
-                Tables\Actions\ViewAction::make(),
+                ViewAction::make(),
             ])
             ->bulkActions([]);
     }
