@@ -135,6 +135,23 @@ class Product extends Model
             ->where('slug', '<>', '');
     }
 
+    public function scopeOrderByStorefrontPriority(Builder $query): Builder
+    {
+        return $query
+            ->orderByRaw('CASE WHEN COALESCE(products.quantity, 0) > 0 THEN 0 ELSE 1 END')
+            ->orderByRaw(<<<'SQL'
+                CASE WHEN (
+                    NULLIF(TRIM(products.primary_image), '') IS NOT NULL
+                    OR EXISTS (
+                        SELECT 1
+                        FROM product_images
+                        WHERE product_images.product_id = products.id
+                            AND NULLIF(TRIM(product_images.path), '') IS NOT NULL
+                    )
+                ) THEN 0 ELSE 1 END
+                SQL);
+    }
+
     public function scopeEligibleForKaspiEnrichment(Builder $query): Builder
     {
         return $query

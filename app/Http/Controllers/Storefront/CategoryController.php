@@ -44,6 +44,7 @@ class CategoryController extends Controller
             'price_desc' => $productsQuery->orderByDesc('price')->orderBy('name'),
             'name' => $productsQuery->orderBy('name'),
             default => $productsQuery
+                ->orderByStorefrontPriority()
                 ->orderByDesc('images_count')
                 ->orderByRaw('CASE WHEN description IS NULL OR description = "" THEN 0 ELSE 1 END DESC')
                 ->orderByDesc('updated_at'),

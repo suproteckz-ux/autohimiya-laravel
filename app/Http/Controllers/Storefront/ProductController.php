@@ -49,6 +49,7 @@ class ProductController extends Controller
                 }
             })
             ->withCount('images')
+            ->orderByStorefrontPriority()
             ->orderByDesc('images_count')
             ->orderByDesc('updated_at')
             ->limit(8)

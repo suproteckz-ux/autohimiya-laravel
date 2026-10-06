@@ -19,10 +19,8 @@ class HomeController extends Controller
         $newProducts = Product::query()
             ->with(['brand', 'primaryImage'])
             ->visibleOnStorefront()
-            ->where(function ($query): void {
-                $query->whereNotNull('primary_image')->orWhereHas('images');
-            })
             ->withCount('images')
+            ->orderByStorefrontPriority()
             ->orderByDesc('created_at')
             ->orderByDesc('updated_at')
             ->limit(6)
@@ -32,13 +30,11 @@ class HomeController extends Controller
             ->with(['brand', 'primaryImage'])
             ->visibleOnStorefront()
             ->where(function ($query): void {
-                $query->whereNotNull('primary_image')->orWhereHas('images');
-            })
-            ->where(function ($query): void {
                 $query->where('is_hit', true)->orWhere('is_featured', true);
             })
             ->whereNotIn('id', $newProducts->pluck('id'))
             ->withCount('images')
+            ->orderByStorefrontPriority()
             ->orderByDesc('is_hit')
             ->orderByDesc('is_featured')
             ->orderByDesc('images_count')
@@ -51,11 +47,9 @@ class HomeController extends Controller
             $featuredProducts = Product::query()
                 ->with(['brand', 'primaryImage'])
                 ->visibleOnStorefront()
-                ->where(function ($query): void {
-                    $query->whereNotNull('primary_image')->orWhereHas('images');
-                })
                 ->whereNotIn('id', $newProducts->pluck('id'))
                 ->withCount('images')
+                ->orderByStorefrontPriority()
                 ->orderByDesc('images_count')
                 ->orderByRaw('CASE WHEN description IS NULL OR description = "" THEN 0 ELSE 1 END DESC')
                 ->orderByDesc('quantity')

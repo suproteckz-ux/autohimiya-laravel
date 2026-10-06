@@ -28,6 +28,7 @@ class SearchController extends Controller
                 });
             })
             ->withCount('images')
+            ->orderByStorefrontPriority()
             ->orderByDesc('images_count')
             ->orderBy('name')
             ->paginate(24)
