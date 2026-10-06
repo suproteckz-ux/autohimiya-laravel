@@ -117,7 +117,11 @@
                         <h2>Купить в Kaspi</h2>
                         <p>Откройте карточку товара в Kaspi.kz, чтобы оформить покупку или рассрочку.</p>
                     </div>
-                    <div class="kaspi-button-wrap">
+                    <div
+                        class="kaspi-button-wrap"
+                        data-metrika-product-id="{{ $product->id }}"
+                        data-metrika-sku="{{ $sku }}"
+                    >
                         <x-kaspi.credit-button :product="$product" />
                     </div>
                 </section>

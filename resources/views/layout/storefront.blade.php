@@ -64,6 +64,87 @@
             trackLinks:true
         });
     </script>
+    <script>
+        (() => {
+            const counterId = 113470780;
+            const allowedGoalParams = {
+                add_to_cart: ['sku', 'product_id', 'price'],
+                order_success: ['order_number', 'total', 'city'],
+                kaspi_click: ['sku', 'product_id'],
+                whatsapp_click: ['source'],
+            };
+
+            const sanitizeParams = (goal, params) => Object.fromEntries(
+                Object.entries(params || {}).filter(([key, value]) => (
+                    allowedGoalParams[goal]?.includes(key)
+                    && ['string', 'number'].includes(typeof value)
+                    && value !== ''
+                )),
+            );
+
+            window.reachMetrikaGoal = (goal, params = {}) => {
+                if (typeof window.ym !== 'function') {
+                    return false;
+                }
+
+                try {
+                    window.ym(counterId, 'reachGoal', goal, sanitizeParams(goal, params));
+
+                    return true;
+                } catch (error) {
+                    return false;
+                }
+            };
+
+            const whatsappSource = (link) => {
+                if (link.closest('.mobile-menu')) return 'mobile_menu';
+                if (link.closest('.site-header')) return 'header';
+                if (link.closest('.product-page')) return 'product';
+                if (link.closest('.hero')) return 'hero';
+                if (link.closest('.contacts-shell')) return 'contacts';
+                if (link.closest('.product-card')) return 'product_card';
+                if (link.closest('.site-footer')) return 'footer';
+
+                return 'storefront';
+            };
+
+            const kaspiParams = (element) => {
+                const container = element.closest('.kaspi-button-wrap');
+
+                return {
+                    sku: container?.dataset.metrikaSku,
+                    product_id: container?.dataset.metrikaProductId,
+                };
+            };
+
+            document.addEventListener('click', (event) => {
+                const target = event.target instanceof Element ? event.target : null;
+                const whatsappLink = target?.closest('a[href*="wa.me/"], a[href*="api.whatsapp.com/"]');
+
+                if (whatsappLink) {
+                    window.reachMetrikaGoal('whatsapp_click', { source: whatsappSource(whatsappLink) });
+
+                    return;
+                }
+
+                const kaspiControl = target?.closest(
+                    'a[href*="kaspi.kz"], .kaspi-button-wrap .ks-widget, .kaspi-button-wrap a, .kaspi-button-wrap button, .kaspi-button-wrap [role="button"]',
+                );
+
+                if (kaspiControl) {
+                    window.reachMetrikaGoal('kaspi_click', kaspiParams(kaspiControl));
+                }
+            });
+
+            document.addEventListener('storefront:add-to-cart:success', (event) => {
+                window.reachMetrikaGoal('add_to_cart', event.detail);
+            });
+
+            document.addEventListener('storefront:order:success', (event) => {
+                window.reachMetrikaGoal('order_success', event.detail);
+            });
+        })();
+    </script>
     <style>{!! file_get_contents(resource_path('css/storefront.css')) !!}</style>
 </head>
 <body>
