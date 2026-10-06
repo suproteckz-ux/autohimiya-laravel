@@ -10,6 +10,7 @@ use App\Services\Kaspi\KaspiProductDiscoveryService;
 use App\Support\ContentScore;
 use Filament\Actions\Action;
 use Filament\Actions\ActionGroup;
+use Filament\Actions\DeleteAction;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\EditRecord;
 
@@ -139,6 +140,10 @@ class EditProduct extends EditRecord
                 ->label('Ещё')
                 ->icon('heroicon-o-ellipsis-vertical')
                 ->color('gray'),
+            DeleteAction::make()
+                ->label('Удалить товар')
+                ->successRedirectUrl(ProductResource::getUrl('index'))
+                ->successNotificationTitle('Товар удалён'),
         ];
     }
 }

@@ -5,8 +5,8 @@ namespace App\Filament\Resources;
 use App\Filament\Resources\ProductResource\Pages;
 use App\Models\CatalogEnrichmentTask;
 use App\Models\Product;
-use App\Services\Catalog\ProductThumbnailGenerator;
 use App\Services\Catalog\ProductBulkCategoryAssigner;
+use App\Services\Catalog\ProductThumbnailGenerator;
 use App\Support\AdminBrandOptions;
 use App\Support\AdminCategoryOptions;
 use App\Support\ProductStatus;
@@ -14,6 +14,8 @@ use BackedEnum;
 use Filament\Actions\Action;
 use Filament\Actions\ActionGroup;
 use Filament\Actions\BulkAction;
+use Filament\Actions\DeleteAction;
+use Filament\Actions\DeleteBulkAction;
 use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Repeater;
@@ -46,11 +48,17 @@ use UnitEnum;
 class ProductResource extends Resource
 {
     protected static ?string $model = Product::class;
-    protected static string | BackedEnum | null $navigationIcon = 'heroicon-o-cube';
-    protected static string | UnitEnum | null $navigationGroup = 'Каталог';
+
+    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-cube';
+
+    protected static string|UnitEnum|null $navigationGroup = 'Каталог';
+
     protected static ?string $navigationLabel = 'Товары';
+
     protected static ?string $modelLabel = 'товар';
+
     protected static ?string $pluralModelLabel = 'товары';
+
     protected static ?int $navigationSort = 10;
 
     public static function form(Schema $schema): Schema
@@ -349,6 +357,9 @@ class ProductResource extends Resource
                             $generator = app(ProductThumbnailGenerator::class);
                             $record->images()->get()->each(fn ($image) => $generator->make($image, true));
                         }),
+                    DeleteAction::make()
+                        ->label('Удалить товар')
+                        ->successNotificationTitle('Товар удалён'),
                 ])
                     ->label('Еще')
                     ->icon('heroicon-o-ellipsis-vertical')
@@ -407,6 +418,12 @@ class ProductResource extends Resource
 
                         return Response::streamDownload(fn () => print $csv, 'products-selected.csv', ['Content-Type' => 'text/csv']);
                     }),
+                DeleteBulkAction::make()
+                    ->label('Удалить выбранные')
+                    ->modalHeading('Удалить выбранные товары?')
+                    ->modalDescription('Товары будут перемещены в корзину. Связанные данные сохранят существующее поведение базы данных.')
+                    ->successNotificationTitle('Выбранные товары удалены')
+                    ->failureNotificationTitle('Не все товары удалось удалить'),
             ])
             ->paginationPageOptions([25, 50, 100])
             ->defaultPaginationPageOption(25);
