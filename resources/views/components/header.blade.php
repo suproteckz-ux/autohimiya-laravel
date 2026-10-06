@@ -72,10 +72,10 @@
         <a href="{{ route('contacts') }}">Контакты</a>
     </nav>
 
-    <div class="mobile-menu-overlay" data-mobile-menu-close></div>
-    <aside class="mobile-menu" id="mobile-menu" aria-hidden="true">
+    <div class="mobile-menu-overlay" data-mobile-menu-close aria-hidden="true"></div>
+    <aside class="mobile-menu" id="mobile-menu" role="dialog" aria-modal="true" aria-labelledby="mobile-menu-title" aria-hidden="true" tabindex="-1">
         <div class="mobile-menu-head">
-            <strong>Меню</strong>
+            <strong id="mobile-menu-title">Меню</strong>
             <button type="button" aria-label="Закрыть меню" data-mobile-menu-close>×</button>
         </div>
         <form class="mobile-menu-search" action="{{ route('search.index') }}" method="get">
@@ -112,6 +112,7 @@
                 const menu = document.querySelector('.mobile-menu');
                 const overlay = document.querySelector('.mobile-menu-overlay');
                 const closeNodes = document.querySelectorAll('[data-mobile-menu-close], .mobile-menu a');
+                const closeButton = menu?.querySelector('[data-mobile-menu-close]');
 
                 if (!toggle || !menu || !overlay || toggle.dataset.ready === '1') {
                     return;
@@ -121,12 +122,18 @@
                     document.body.classList.add('mobile-menu-open');
                     toggle.setAttribute('aria-expanded', 'true');
                     menu.setAttribute('aria-hidden', 'false');
+                    closeButton?.focus();
                 };
 
                 const close = () => {
+                    const wasOpen = document.body.classList.contains('mobile-menu-open');
                     document.body.classList.remove('mobile-menu-open');
                     toggle.setAttribute('aria-expanded', 'false');
                     menu.setAttribute('aria-hidden', 'true');
+
+                    if (wasOpen) {
+                        toggle.focus();
+                    }
                 };
 
                 toggle.dataset.ready = '1';
